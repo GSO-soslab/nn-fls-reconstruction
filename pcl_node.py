@@ -20,7 +20,7 @@ class SonarPointCloudPublisher(Node):
         self.declare_parameter('original_csv', '/home/farhang/Downloads/fls_all_with_phi.csv')
         self.declare_parameter('predicted_csv', '/home/farhang/Downloads/fls_2d_terrain_prediction_output.csv')
         self.declare_parameter('frame_id', 'sonar_link')
-        self.declare_parameter('publish_rate', 0.5)
+        self.declare_parameter('publish_rate', 2.0)
         self.declare_parameter('azimuth', 0.0)
         self.declare_parameter('auto_play', True)
         self.declare_parameter('intensity_threshold', 0.1)
@@ -158,16 +158,29 @@ class SonarPointCloudPublisher(Node):
                         az_rad = self.azimuth
                         
                         # Spherical to Cartesian conversion
-                        x = range_val * np.cos(phi_rad) * np.cos(tangent_rad) * np.cos(az_rad)
-                        y = range_val * np.cos(phi_rad) * np.cos(tangent_rad) * np.sin(az_rad)
-                        z = range_val * np.sin(phi_rad)
+                        # x = range_val * np.cos(phi_rad) * np.cos(tangent_rad) * np.cos(az_rad)
+                        # y = range_val * np.cos(phi_rad) * np.cos(tangent_rad) * np.sin(az_rad)
+                        # z = range_val * np.sin(phi_rad)
                         
+                        x = range_val * np.cos(phi_rad)
+                        y = range_val * np.sin(az_rad)
+                        z = range_val * np.sin(phi_rad)
+
+                        # Normal from tangent
+                        n_x = -tangent
+                        n_y = 0.0
+                        n_z = 1.0
+                        norm = np.sqrt(n_x**2 + n_y**2 + n_z**2)
+                        n_x /= norm
+                        n_y /= norm
+                        n_z /= norm
+
                         # if len(points) < 5:  # Print first few points for debugging
                         #     self.get_logger().info(f"Point {len(points)}: phi={phi:.3f}, tangent={tangent:.3f}, "
                         #                         f"x={x:.3f}, y={y:.3f}, z={z:.3f}")
                         # Add point with additional metadata
-                        points.append([x, y, z, intensity, point_idx, pair_idx])
-        
+                        points.append([x, y, z, intensity, n_x, n_y, n_z, point_idx, pair_idx])
+
         return np.array(points)
 
     # def create_pointcloud2_msg(self, points, timestamp, data_type="original"):
@@ -184,47 +197,112 @@ class SonarPointCloudPublisher(Node):
         
     #     return pc2_msg
 
+    # def create_pointcloud2_msg(self, points, timestamp, data_type="original"):
+    #     """Create a PointCloud2 message from points array"""
+    #     header = Header()
+    #     header.stamp = self.get_clock().now().to_msg()
+    #     header.frame_id = self.frame_id
+        
+    #     if data_type == "predicted":
+    #         header.frame_id = "sonar_link_predicted"
+    #     else:
+    #         header.frame_id = "sonar_link_original"
+            
+    #     # Create structured array with XYZ + intensity
+    #     dtype = [
+    #         ('x', np.float32),
+    #         ('y', np.float32), 
+    #         ('z', np.float32),
+    #         ('intensity', np.float32)
+    #     ]
+        
+
+    #     # Convert to structured array
+    #     structured_points = np.empty(len(points), dtype=dtype)
+    #     structured_points['x'] = points[:, 0].astype(np.float32)
+    #     structured_points['y'] = points[:, 1].astype(np.float32)
+    #     structured_points['z'] = points[:, 2].astype(np.float32)
+    #     structured_points['intensity'] = points[:, 3].astype(np.float32)  # intensity is column 3
+        
+    #     # Define fields for XYZI
+    #     fields = [
+    #         PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+    #         PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+    #         PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+    #         PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1)
+    #     ]
+        
+        
+    #     # Create PointCloud2 message
+    #     pc2_msg = pc2.create_cloud(header, fields, structured_points)
+        
+    #     return pc2_msg
+    
     def create_pointcloud2_msg(self, points, timestamp, data_type="original"):
-        """Create a PointCloud2 message from points array"""
+        """Create a PointCloud2 message including normals"""
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
         header.frame_id = self.frame_id
-        
+
         if data_type == "predicted":
             header.frame_id = "sonar_link_predicted"
         else:
             header.frame_id = "sonar_link_original"
-            
+
         # Create structured array with XYZ + intensity
         dtype = [
-            ('x', np.float32),
+            ('x', np.float32), 
             ('y', np.float32), 
             ('z', np.float32),
-            ('intensity', np.float32)
+            ('intensity', np.float32), 
+            ('nx', np.float32), 
+            ('ny', np.float32),
+            ('nz', np.float32),
+            ('point_idx', np.uint32), 
+            ('pair_idx', np.uint32)
         ]
-        
 
-        # Convert to structured array
-        structured_points = np.empty(len(points), dtype=dtype)
-        structured_points['x'] = points[:, 0].astype(np.float32)
-        structured_points['y'] = points[:, 1].astype(np.float32)
-        structured_points['z'] = points[:, 2].astype(np.float32)
-        structured_points['intensity'] = points[:, 3].astype(np.float32)  # intensity is column 3
-        
-        # Define fields for XYZI
+        # Define fields: XYZ + intensity + normals
         fields = [
             PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
             PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
             PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
-            PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1)
+            PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
+            PointField(name='nx', offset=16, datatype=PointField.FLOAT32, count=1),
+            PointField(name='ny', offset=20, datatype=PointField.FLOAT32, count=1),
+            PointField(name='nz', offset=24, datatype=PointField.FLOAT32, count=1),
+            PointField(name='point_idx', offset=28, datatype=PointField.UINT32, count=1),
+            PointField(name='pair_idx', offset=32, datatype=PointField.UINT32, count=1),
         ]
-        
-        
-        # Create PointCloud2 message
-        pc2_msg = pc2.create_cloud(header, fields, structured_points)
-        
+
+
+        # Create structured array for point cloud
+        structured_points = np.zeros(len(points), dtype=dtype)
+        structured_points['x'] = points[:,0]
+        structured_points['y'] = points[:,1]
+        structured_points['z'] = points[:,2]
+        structured_points['intensity'] = points[:,3]
+        structured_points['nx'] = points[:,4]
+        structured_points['ny'] = points[:,5]
+        structured_points['nz'] = points[:,6]
+
+        # Compute point_step and row_step
+        point_step = 36  #7 floats × 4 bytes + 2 uint32 × 4 bytes
+        row_step = point_step * len(points)
+
+        # Flatten structured array to list of tuples
+        flat_points = [tuple(p) for p in structured_points]
+
+        pc2_msg = pc2.create_cloud(header, fields, flat_points)
+        pc2_msg.height = 1
+        pc2_msg.width = len(points)
+        pc2_msg.is_dense = True
+        pc2_msg.is_bigendian = False
+        pc2_msg.point_step = point_step
+        pc2_msg.row_step = row_step
+
         return pc2_msg
-    
+
     def publish_tf_frame(self, timestamp):
         """Publish TF frame for the sonar"""
         t = TransformStamped()
