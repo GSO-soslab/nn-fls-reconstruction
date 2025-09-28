@@ -9,7 +9,9 @@ import math
 import os
 from contextlib import nullcontext
 import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
 
+import csv
 # ==================== UTILITIES ====================
 
 def get_device():
@@ -35,40 +37,6 @@ def create_valid_mask(data, invalid_values=[-20.0]):
 def ensure_dir(path):
     """Ensure directory exists."""
     os.makedirs(path, exist_ok=True)
-
-# def reshape_predictions(predictions):
-#     """
-#     Reshape [batch_size, 2672] to phis [batch_size, 4, 668].
-
-#     For tangent mode, uncomment the lines below and modify output dimensions:
-#     # tangents = reshaped[:, :, :4].transpose(1, 2)  # [batch, 4, 668]
-#     # phis = reshaped[:, :, 4:].transpose(1, 2)      # [batch, 4, 668]
-#     """
-#     if predictions.dim() == 1:
-#         predictions = predictions.unsqueeze(0)
-#         squeeze_output = True
-#     else:
-#         squeeze_output = False
-
-#     batch_size = predictions.size(0)
-
-#     # Current mode: phis only
-#     phis = torch.zeros(batch_size, 4, 668)
-#     for i in range(4):
-#         phis[:, i, :] = predictions[:, i::4]
-
-#     # For tangent + phi mode, use this instead:
-#     # reshaped = predictions.view(batch_size, 668, 8)
-#     # tangents = reshaped[:, :, :4].transpose(1, 2)
-#     # phis = reshaped[:, :, 4:].transpose(1, 2)
-
-#     tangents = torch.zeros_like(phis)  # Disabled for phi-only mode
-
-#     if squeeze_output:
-#         tangents = tangents.squeeze(0)
-#         phis = phis.squeeze(0)
-
-#     return tangents, phis
 
 def reshape_predictions(predictions, prediction_type):
     """
@@ -211,15 +179,25 @@ def save_predictions_to_csv(tangent_results, phi_results, original_csv_path, out
     Columns 670-3341: tangents (2672 columns) - REPLACE WITH PREDICTIONS
     Columns 3342-6013: phis (2672 columns) - REPLACE WITH PREDICTIONS
     """
-    original_df = pd.read_csv(original_csv_path)
-    # print(f"Total columns: {len(original_df.columns)}")
-    # print(f"Column names: {list(original_df.columns)}")
-    output_df = original_df.copy()
+    # Read the original CSV data
+    original_data = []
+    with open(original_csv_path, 'r', newline='') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            # Convert strings to floats where applicable
+            processed_row = []
+            for val in row:
+                try:
+                    processed_row.append(float(val))
+                except ValueError:
+                    processed_row.append(val)
+            original_data.append(processed_row)
 
-    # print(f"Original CSV shape: {original_df.shape}")
+    # Create output data by copying original data
+    output_data = [row[:] for row in original_data]  # Deep copy
 
     for row_idx in tangent_results.keys():
-        if row_idx < len(output_df) and row_idx in phi_results:
+        if row_idx < len(output_data) and row_idx in phi_results:
             pred_tangents = tangent_results[row_idx]['pred_tangents']  # Shape: [4, 668]
             pred_phis = phi_results[row_idx]['pred_phis']              # Shape: [4, 668]
 
@@ -230,20 +208,354 @@ def save_predictions_to_csv(tangent_results, phi_results, original_csv_path, out
             tangent_flat = pred_tangents.flatten()  # Convert [4,668] to [2672]
 
             for i, val in enumerate(tangent_flat):
-                if tangent_start + i < len(output_df.columns):
-                    output_df.iloc[row_idx, tangent_start + i] = val
+                col_idx = tangent_start + i
+                if col_idx < len(output_data[row_idx]):
+                    output_data[row_idx][col_idx] = float(val)
 
             # Replace phi columns (columns 3341-6012, which is 2672 columns)
             phi_start = 669 + 2672  # After timestamp + intensities + tangents
             phi_flat = pred_phis.flatten()  # Convert [4,668] to [2672]
 
             for i, val in enumerate(phi_flat):
-                if phi_start + i < len(output_df.columns):
-                    output_df.iloc[row_idx, phi_start + i] = val
+                col_idx = phi_start + i
+                if col_idx < len(output_data[row_idx]):
+                    output_data[row_idx][col_idx] = float(val)
 
-    output_df.to_csv(output_csv_path, index=False)
+    # Write the predictions to CSV
+    with open(output_csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        for row in output_data:
+            writer.writerow(row)
+
     print(f"Predictions saved to {output_csv_path}")
-    return output_df
+    return output_data
+
+# def save_splits_to_csv(csv_file, base_dir="./data_splits"):
+#     """Save actual dataset splits to separate CSV files"""
+#     os.makedirs(base_dir, exist_ok=True)
+
+#     # Load the original CSV
+#     df = pd.read_csv(csv_file, header=None)
+
+#     # Create reproducible splits with fixed seed
+#     train_df, temp_df = train_test_split(df, test_size=0.3, random_state=42)
+#     val_df, test_df = train_test_split(temp_df, test_size=0.5, random_state=42)
+
+#     # Save the actual data to CSV files
+#     train_df.to_csv(f"{base_dir}/train_data.csv", index=False, header=False, na_rep='NaN')
+#     val_df.to_csv(f"{base_dir}/val_data.csv", index=False, header=False, na_rep='NaN')
+#     test_df.to_csv(f"{base_dir}/test_data.csv", index=False, header=False, na_rep='NaN')
+
+#     print(f"Data splits saved to {base_dir}/")
+#     print(f"Train: {len(train_df)} samples")
+#     print(f"Val: {len(val_df)} samples")
+#     print(f"Test: {len(test_df)} samples")
+
+#     return f"{base_dir}/train_data.csv", f"{base_dir}/val_data.csv", f"{base_dir}/test_data.csv"
+
+def save_splits_to_csv(csv_file, base_dir="./data_splits"):
+    """Save actual dataset splits to separate CSV files"""
+    os.makedirs(base_dir, exist_ok=True)
+
+    # Read the raw file as text lines to preserve exact format
+    with open(csv_file, 'r') as f:
+        lines = f.readlines()
+
+    # Remove any trailing newlines but preserve the data exactly
+    lines = [line.rstrip('\n\r') for line in lines]
+
+    # Create indices for splitting (same random seed logic)
+    np.random.seed(42)
+    indices = np.arange(len(lines))
+
+    # Split indices instead of dataframe
+    train_indices, temp_indices = train_test_split(indices, test_size=0.3, random_state=42)
+    val_indices, test_indices = train_test_split(temp_indices, test_size=1/3, random_state=42)
+
+    # Write lines directly without pandas processing
+    with open(f"{base_dir}/train_data.csv", 'w') as f:
+        for idx in train_indices:
+            f.write(lines[idx] + '\n')
+
+    with open(f"{base_dir}/val_data.csv", 'w') as f:
+        for idx in val_indices:
+            f.write(lines[idx] + '\n')
+
+    with open(f"{base_dir}/test_data.csv", 'w') as f:
+        for idx in test_indices:
+            f.write(lines[idx] + '\n')
+
+    print(f"Data splits saved to {base_dir}/")
+    print(f"Train: {len(train_indices)} samples")
+    print(f"Val: {len(val_indices)} samples")
+    print(f"Test: {len(test_indices)} samples")
+
+    return f"{base_dir}/train_data.csv", f"{base_dir}/val_data.csv", f"{base_dir}/test_data.csv"
+
+def save_splits_with_indices_to_csv(csv_file, base_dir="./data_splits"):
+    """Create test_data_with_indices.csv from existing split by recreating the same split"""
+    os.makedirs(base_dir, exist_ok=True)
+
+    # Read the raw file as text lines to preserve exact format
+    with open(csv_file, 'r') as f:
+        lines = f.readlines()
+
+    # Remove any trailing newlines but preserve the data exactly
+    lines = [line.rstrip('\n\r') for line in lines]
+
+    # Create indices for splitting (same random seed logic)
+    np.random.seed(42)
+    indices = np.arange(len(lines))
+
+    # Split indices instead of dataframe - EXACT same logic as original function
+    train_indices, temp_indices = train_test_split(indices, test_size=0.3, random_state=42)
+    val_indices, test_indices = train_test_split(temp_indices, test_size=1/3, random_state=42)
+
+    # Write ONLY test split with original indices prepended to each line
+    #Uncomment to save for test
+    with open(f"{base_dir}/test_data_with_indices.csv", 'w') as f:
+        for idx in test_indices:
+            # Prepend original line index to the line content
+            f.write(f"{idx},{lines[idx]}\n")
+
+    #uncomment to save for train
+    # with open(f"{base_dir}/train_data_with_indices.csv", 'w') as f:
+    #     for idx in train_indices:
+    #         f.write(f"{idx},{lines[idx]}\n")
+
+    print(f"Created test_data_with_indices.csv with {len(test_indices)} samples")
+
+    #uncomment to save for train
+    # return f"{base_dir}/train_data_with_indices.csv"
+
+    #uncomment to save for test
+    return f"{base_dir}/test_data_with_indices.csv"
+
+
+
+def save_test_indices_vs_original_pcl_plots(test_csv_path, original_csv_path, output_dir="./test_indices_vs_original",
+                                          range_resolution=0.05988024, intensity_threshold=0.1, azimuth=0.0):
+    """
+    Plot only the rows that are in test split vs their corresponding original rows
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Read both files as pure text lines
+    with open(test_csv_path, 'r') as f:
+        test_lines = [line.rstrip('\n\r') for line in f.readlines()]
+
+    with open(original_csv_path, 'r') as f:
+        original_lines = [line.rstrip('\n\r') for line in f.readlines()]
+
+
+    # Extract test indices from first column of each test line
+    test_indices = []
+    test_data_lines = []
+
+    for line in test_lines:
+        if line.strip():  # Skip empty lines
+            parts = line.split(',', 1)  # Split only on first comma
+            if len(parts) >= 2:
+                try:
+                    test_indices.append(int(parts[0]))  # First part is the index
+                    test_data_lines.append(parts[1])   # Rest is the actual data
+                except ValueError:
+                    print(f"Warning: Could not parse index from line: {line[:50]}...")
+                    continue
+
+    print("First 5 test indices:", test_indices[:5])
+
+    # Plot only these specific indices
+    for i, original_row_idx in enumerate(test_indices):
+        try:
+            # Get original row (convert to 0-based indexing)
+            if original_row_idx < len(original_lines):
+                original_row_data = original_lines[original_row_idx]
+            else:
+                print(f"Warning: Index {original_row_idx} out of range for original data")
+                continue
+
+            # Get corresponding test row data
+            test_row_data = test_data_lines[i]
+
+            # Extract points using pure text processing
+            orig_x, orig_z = extract_pcl_points_from_row(original_row_data, range_resolution, intensity_threshold, azimuth, has_indices=True)
+            test_x, test_z = extract_pcl_points_from_row(test_row_data, range_resolution, intensity_threshold, azimuth, has_indices=True)
+
+            # Plot comparison
+            if len(orig_x) > 0 or len(test_x) > 0:
+                plt.figure(figsize=(15, 8))
+
+                # Original data (blue)
+                if len(orig_x) > 0:
+                    plt.scatter(orig_x, orig_z, c='blue', s=3, alpha=0.8, label=f'Original Row {original_row_idx}')
+
+                # Test data (red)
+                if len(test_x) > 0:
+                    plt.scatter(test_x, test_z, c='red', s=2, alpha=0.6, label=f'Test Split Row {original_row_idx}')
+
+                plt.xlabel('X (meters)')
+                plt.ylabel('Z (meters)')
+                plt.title(f'Original vs Test Split - Row Index {original_row_idx}')
+                plt.legend()
+                plt.grid(True, alpha=0.3)
+                plt.axis('equal')
+
+                # Add lines from sensor to show measurement directions (optional)
+                plt.axhline(y=0, color='gray', linestyle='--', alpha=0.3)
+                plt.axvline(x=0, color='gray', linestyle='--', alpha=0.3)
+
+                plt.savefig(f"{output_dir}/row_index_{int(original_row_idx):04d}.png", dpi=300, bbox_inches='tight')
+                plt.close()
+
+                # if i < 5:  # Print first few for verification
+                #     print(f"Plotted row index {original_row_idx}: Original={len(orig_x)}, Test={len(test_x)} points")
+
+        except Exception as e:
+            print(f"Error processing row {i} (original index {original_row_idx}): {e}")
+            continue
+
+    print(f"Finished plotting {len(test_indices)} test rows")
+
+
+
+def save_predictions_with_indices_to_csv(tangent_results, phi_results, test_csv_path, output_csv_path):
+    """
+    Save predictions with original indices for comparison plotting.
+    This creates a CSV with predictions that can be compared against original data.
+    Uses pure text processing instead of pandas.
+    """
+    # Read the test CSV data
+    test_data = []
+    with open(test_csv_path, 'r', newline='') as f:
+        reader = csv.reader(f)
+        for row in reader:
+            # Convert strings to floats where applicable, keep original index as string/int
+            processed_row = []
+            for i, val in enumerate(row):
+                if i == 0:  # Keep original index as is
+                    processed_row.append(val)
+                else:
+                    try:
+                        processed_row.append(float(val))
+                    except ValueError:
+                        processed_row.append(val)
+            test_data.append(processed_row)
+
+    print(f"Creating predictions CSV with {len(test_data)} test samples...")
+
+    # Create output data by copying test data
+    output_data = [row[:] for row in test_data]  # Deep copy
+
+    # Replace predictions for each test row
+    for i in range(len(test_data)):
+        if i in tangent_results and i in phi_results:
+            # Get predictions for this test sample
+            pred_tangents = tangent_results[i]['pred_tangents']  # Shape: [4, 668]
+            pred_phis = phi_results[i]['pred_phis']              # Shape: [4, 668]
+
+            # The test CSV has structure: [original_index, timestamp, intensities(668), tangents(2672), phis(2672)]
+            # Keep original_index (col 0), timestamp (col 1), and intensities (cols 2-669) unchanged
+
+            # Replace tangent columns (cols 670-3341, accounting for the extra index column)
+            tangent_start = 670  # After index + timestamp + 668 intensities
+            tangent_flat = pred_tangents.flatten()  # Convert [4,668] to [2672]
+
+            for j, val in enumerate(tangent_flat):
+                col_idx = tangent_start + j
+                if col_idx < len(output_data[i]):
+                    output_data[i][col_idx] = float(val)
+
+            # Replace phi columns (cols 3342-6013, accounting for the extra index column)
+            phi_start = 670 + 2672  # After index + timestamp + intensities + tangents
+            phi_flat = pred_phis.flatten()  # Convert [4,668] to [2672]
+
+            for j, val in enumerate(phi_flat):
+                col_idx = phi_start + j
+                if col_idx < len(output_data[i]):
+                    output_data[i][col_idx] = float(val)
+
+    # Write the predictions with indices to CSV
+    with open(output_csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        for row in output_data:
+            writer.writerow(row)
+
+    print(f"Predictions with indices saved to {output_csv_path}")
+    return output_data
+
+def extract_pcl_points_from_row(row_data, range_resolution, intensity_threshold, azimuth, has_indices=False):
+    """Extract x,z points using correct range calculation - pure text processing"""
+
+    # Split CSV row into values
+    if isinstance(row_data, str):
+        values = row_data.split(',')
+    else:
+        # Handle case where it's already a list
+        values = row_data
+
+    # Convert to float, handling empty/invalid values
+    def safe_float(val):
+        try:
+            if isinstance(val, str):
+                val = val.strip()
+                if val == '' or val == 'nan':
+                    return float('nan')
+            return float(val)
+        except (ValueError, TypeError):
+            return float('nan')
+
+    numeric_values = [safe_float(v) for v in values]
+
+    # Extract intensities and phis based on column positions
+    if has_indices:
+        # Skip first column (index) in test data
+        intensities = numeric_values[2:670]  # columns 2-669
+        phis = numeric_values[3342:6014]     # columns 3342-6013
+    else:
+        intensities = numeric_values[1:669]  # columns 1-668
+        phis = numeric_values[3341:6013]     # columns 3341-6012
+
+    x_points = []
+    z_points = []
+
+    for point_idx in range(668):
+        reverse_idx = 667 - point_idx
+
+        # Check if we have valid intensity data
+        if point_idx < len(intensities):
+            intensity = intensities[point_idx]
+        else:
+            continue
+
+        # if not pd.isna(intensity) and intensity > intensity_threshold:
+
+        # Range calculation using the full range span
+        max_range = 40.0
+        min_range = 0.5
+        range_val = min_range + (reverse_idx / 668) * (max_range - min_range)
+
+        phi_start_idx = point_idx * 4
+
+        for beam_idx in range(4):
+            phi_idx = phi_start_idx + beam_idx
+
+            # Check if phi index is within bounds
+            if phi_idx < len(phis):
+                phi_rad = phis[phi_idx]
+            else:
+                continue
+
+            if not pd.isna(phi_rad) and phi_rad not in [-10.0, -20.0]:
+                # Calculate 3D coordinates
+                x = range_val * np.cos(azimuth) * np.cos(phi_rad)
+                y = range_val * np.sin(azimuth) * np.cos(phi_rad)
+                z = range_val * np.sin(phi_rad)
+
+                x_points.append(x)
+                z_points.append(z)
+
+    return x_points, z_points
 
 # ==================== MODEL ARCHITECTURE ====================
 
@@ -263,9 +575,11 @@ class ResidualBlock1D(nn.Module):
     def forward(self, x):
         return self.relu(self.block(x) + x)
 
-class IntensityToBathymetryPhiUNet1D(nn.Module):
-    def __init__(self, dropout_rate=0.1):
+class IntensityToBathymetryUNet1D(nn.Module):
+    def __init__(self, prediction_type='phi', dropout_rate=0.1):
         super().__init__()
+        self.prediction_type = prediction_type
+
         # Encoder
         self.enc1 = nn.Sequential(
             nn.Conv1d(1, 64, 7, padding=3),
@@ -303,102 +617,12 @@ class IntensityToBathymetryPhiUNet1D(nn.Module):
 
         # Dual heads for classification and regression
         self.classifier = nn.Conv1d(32, 3, 3, padding=1)  # 3 classes: valid, -10, -20
-        self.regressor = nn.Conv1d(32, 1, 3, padding=1)   # angle values
 
-        # For tangent + phi mode, change output dimensions:
-        # self.regressor = nn.Conv1d(32, 2, 3, padding=1)  # tangent + phi values
-
-    def forward(self, x):
-        batch_size = x.size(0)
-        x = x.view(batch_size, 1, 668)
-
-        # Encoder with skip connections
-        e1 = self.enc1(x)      # [B, 64, 668]
-        e2 = self.enc2(e1)     # [B, 128, 334]
-        e3 = self.enc3(e2)     # [B, 256, 167]
-
-        # Bottleneck
-        b = e3
-        for block in self.residual_blocks:
-            b = block(b)
-
-        # Decoder with skip connections
-        d1 = self.dec1(b)                    # [B, 128, 334]
-        d1 = torch.cat([d1, e2], dim=1)      # [B, 256, 334]
-
-        d2 = self.dec2(d1)                   # [B, 64, 668]
-        d2 = torch.cat([d2, e1], dim=1)      # [B, 128, 668]
-
-        # Final features
-        features = self.final_upsample(d2)   # [B, 32, 2672]
-
-        class_logits = self.classifier(features)  # [B, 3, 2672]
-        angle_pred = self.regressor(features)     # [B, 1, 2672]
-
-        first_logits = class_logits[0]  # shape: [3, 2672]
-
-        # ##################
-        # first_logits = class_logits[0]
-        # # Move to CPU and convert to NumPy
-        # first_logits_np = first_logits.detach().cpu().numpy()  # shape: [3, 2672]
-
-        # # Create a DataFrame where each row is one class (3 rows, 2672 columns)
-        # df = pd.DataFrame(first_logits_np)
-
-        # # Save to CSV
-        # df.to_csv("class_logits_first_sample.csv", index=False)
-
-        # # Print the first 10 values (flattened)
-        # print("First 10 class logits of the first sample:")
-        # print(first_logits_np.flatten()[:10])
-        # ##################
-
-        return class_logits, angle_pred.squeeze(1)
-
-class IntensityToBathymetryTangentsUNet1D(nn.Module):
-    def __init__(self, dropout_rate=0.1):
-        super().__init__()
-        # Encoder
-        self.enc1 = nn.Sequential(
-            nn.Conv1d(1, 64, 7, padding=3),
-            nn.InstanceNorm1d(64), nn.ReLU()
-        )
-        self.enc2 = nn.Sequential(
-            nn.Conv1d(64, 128, 5, stride=2, padding=2),
-            nn.InstanceNorm1d(128), nn.ReLU()
-        )
-        self.enc3 = nn.Sequential(
-            nn.Conv1d(128, 256, 3, stride=2, padding=1),
-            nn.InstanceNorm1d(256), nn.ReLU()
-        )
-
-        # Bottleneck
-        self.residual_blocks = nn.ModuleList([
-            ResidualBlock1D(256, dropout_rate) for _ in range(5)
-        ])
-
-        # Decoder with skip connections
-        self.dec1 = nn.Sequential(
-            nn.ConvTranspose1d(256, 128, 3, stride=2, padding=1, output_padding=1),
-            nn.InstanceNorm1d(128), nn.ReLU()
-        )
-        self.dec2 = nn.Sequential(
-            nn.ConvTranspose1d(256, 64, 5, stride=2, padding=2, output_padding=1),
-            nn.InstanceNorm1d(64), nn.ReLU()
-        )
-
-        # Final upsampling
-        self.final_upsample = nn.Sequential(
-            nn.ConvTranspose1d(128, 32, 7, stride=4, padding=3, output_padding=3),
-            nn.ReLU(),
-        )
-
-        # Dual heads for classification and regression
-        self.classifier = nn.Conv1d(32, 3, 3, padding=1)  # 3 classes: valid, -10, -20
-        self.regressor = nn.Conv1d(32, 1, 3, padding=1)   # angle values
-
-        # For tangent + phi mode, change output dimensions:
-        # self.regressor = nn.Conv1d(32, 2, 3, padding=1)  # tangent + phi values
+        # Output dimensions based on prediction type
+        if prediction_type == 'combined':
+            self.regressor = nn.Conv1d(32, 2, 3, padding=1)  # tangent + phi values
+        else:
+            self.regressor = nn.Conv1d(32, 1, 3, padding=1)   # single angle values
 
     def forward(self, x):
         batch_size = x.size(0)
@@ -425,33 +649,16 @@ class IntensityToBathymetryTangentsUNet1D(nn.Module):
         features = self.final_upsample(d2)   # [B, 32, 2672]
 
         class_logits = self.classifier(features)  # [B, 3, 2672]
-        angle_pred = self.regressor(features)     # [B, 1, 2672]
+        angle_pred = self.regressor(features)     # [B, 1, 2672] or [B, 2, 2672]
 
-        first_logits = class_logits[0]  # shape: [3, 2672]
-
-        # ##################
-        # first_logits = class_logits[0]
-        # # Move to CPU and convert to NumPy
-        # first_logits_np = first_logits.detach().cpu().numpy()  # shape: [3, 2672]
-
-        # # Create a DataFrame where each row is one class (3 rows, 2672 columns)
-        # df = pd.DataFrame(first_logits_np)
-
-        # # Save to CSV
-        # df.to_csv("class_logits_first_sample.csv", index=False)
-
-        # # Print the first 10 values (flattened)
-        # print("First 10 class logits of the first sample:")
-        # print(first_logits_np.flatten()[:10])
-        # ##################
-
-        return class_logits, angle_pred.squeeze(1)
+        return class_logits, angle_pred.squeeze(1) if angle_pred.size(1) == 1 else angle_pred
 
 # ==================== DATA HANDLING ====================
 
-class BathymetryPhiDataset(Dataset):
-    def __init__(self, csv_file):
+class BathymetryDataset(Dataset):
+    def __init__(self, csv_file, prediction_type='phi'):
         self.data = pd.read_csv(csv_file)
+        self.prediction_type = prediction_type
 
     def __len__(self):
         return len(self.data)
@@ -459,49 +666,34 @@ class BathymetryPhiDataset(Dataset):
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
 
-        # Extract data: timestamps(0), intensities(1-668), tangents(669-3340), phis(3341-6012)
+        # Extract intensities (always the same)
         intensities = torch.tensor(row.iloc[1:669].values, dtype=torch.float32)
-        # tangents = torch.tensor(row.iloc[669:3341].values, dtype=torch.float32)
-        phis = torch.tensor(row.iloc[3341:6013].values, dtype=torch.float32)
-
-        # Process data (NaN → -20.0)
         intensities_processed, _ = create_valid_mask(intensities)
-        # tangents_processed, _ = create_valid_mask(tangents)
-        phis_processed, _ = create_valid_mask(phis)
 
-        # Current mode: phis only
-        phis_processed = phis_processed.view(4, 668)
-        ground_truth = phis_processed.contiguous().view(-1)
+        # Extract target data based on prediction type
+        if self.prediction_type == 'phi':
+            target_data = torch.tensor(row.iloc[3341:6013].values, dtype=torch.float32)
+        elif self.prediction_type == 'tangent':
+            target_data = torch.tensor(row.iloc[669:3341].values, dtype=torch.float32)
+        elif self.prediction_type == 'combined':
+            tangents = torch.tensor(row.iloc[669:3341].values, dtype=torch.float32)
+            phis = torch.tensor(row.iloc[3341:6013].values, dtype=torch.float32)
+            # Combine tangents and phis for combined training
+            tangents_processed, _ = create_valid_mask(tangents)
+            phis_processed, _ = create_valid_mask(phis)
+            target_data = torch.stack([
+                tangents_processed.view(4, 668),
+                phis_processed.view(4, 668)
+            ], dim=0).view(8, 668).transpose(0, 1).contiguous().view(-1)
+        else:
+            raise ValueError(f"Unknown prediction_type: {self.prediction_type}")
 
-        # For tangent + phi mode, use:
-        # tangents = tangents_processed.view(4, 668)
-        # phis = phis_processed.view(4, 668)
-        # ground_truth = torch.stack([tangents, phis], dim=0).view(8, 668).transpose(0, 1).contiguous().view(-1)
-
-        return intensities_processed, ground_truth
-
-class BathymetryTangentDataset(Dataset):
-    def __init__(self, csv_file):
-        self.data = pd.read_csv(csv_file)
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        row = self.data.iloc[idx]
-
-        # Extract data: timestamps(0), intensities(1-668), tangents(669-3340), phis(3341-6012)
-        intensities = torch.tensor(row.iloc[1:669].values, dtype=torch.float32)
-        tangents = torch.tensor(row.iloc[669:3341].values, dtype=torch.float32)
-        # phis = torch.tensor(row.iloc[3341:6013].values, dtype=torch.float32)  # Not needed
-
-        # Process data (NaN → -20.0)
-        intensities_processed, _ = create_valid_mask(intensities)
-        tangents_processed, _ = create_valid_mask(tangents)
-
-        # Use tangents as ground truth
-        tangents_processed = tangents_processed.view(4, 668)
-        ground_truth = tangents_processed.contiguous().view(-1)
+        # Process target data for non-combined types
+        if self.prediction_type != 'combined':
+            target_processed, _ = create_valid_mask(target_data)
+            ground_truth = target_processed.view(4, 668).contiguous().view(-1)
+        else:
+            ground_truth = target_data
 
         return intensities_processed, ground_truth
 
@@ -547,6 +739,7 @@ class SequenceBathymetryLoss(nn.Module):
         class_labels = torch.zeros_like(targets, dtype=torch.long)
         class_labels[flag_10_mask] = 1
         class_labels[flag_20_mask] = 2
+        print("Classs Label shape",class_labels.shape)
 
         # Classification loss for all positions
         class_logits = class_logits.permute(0, 2, 1)  # [B, 2672, 3]
@@ -554,6 +747,7 @@ class SequenceBathymetryLoss(nn.Module):
             class_logits.reshape(-1, 3),
             class_labels.reshape(-1)
         )
+        print("Classs Logit shape",class_logits.shape)
 
         # Regression loss only for valid positions
         reg_loss = F.mse_loss(angle_preds[valid_mask], targets[valid_mask]) if valid_mask.any() else torch.tensor(0.0, device=targets.device)
@@ -590,68 +784,7 @@ def run_epoch(model, dataloader, device, optimizer=None):
 
     return total_loss / max(valid_batches, 1)
 
-# def train_model(model, train_loader, val_loader, num_epochs=300, model_name="bathymetry"):
-#     """Train the model with early stopping."""
-#     device = get_device()
-#     model.to(device)
-
-#     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-#     scheduler = torch.optim.lr_scheduler.OneCycleLR(
-#         optimizer, max_lr=1e-2, total_steps=num_epochs,
-#         pct_start=0.3, anneal_strategy='cos'
-#     )
-
-#     print(f"Training on {device}")
-#     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-#     best_val_loss = float('inf')
-#     patience_counter = 0
-#     patience = 60
-
-#     train_losses = []
-#     val_losses = []
-
-#     for epoch in range(num_epochs):
-#         train_loss = run_epoch(model, train_loader, device, optimizer)
-#         val_loss = run_epoch(model, val_loader, device)
-#         scheduler.step()
-
-#         train_losses.append(train_loss)
-#         val_losses.append(val_loss)
-
-#         # Early stopping
-#         if val_loss < best_val_loss - 1e-6:
-#             best_val_loss = val_loss
-#             patience_counter = 0
-#             torch.save(model.state_dict(), 'best_bathymetry_model.pth')
-#         else:
-#             patience_counter += 1
-
-#         if epoch % 10 == 0 or epoch < 5:
-#             print(f"Epoch {epoch+1:3d}/{num_epochs} | Train: {train_loss:.6f} | Val: {val_loss:.6f} | "
-#                   f"Best: {best_val_loss:.6f} | LR: {optimizer.param_groups[0]['lr']:.2e}")
-
-#         if patience_counter >= patience:
-#             print(f"Early stopping at epoch {epoch+1}")
-#             break
-
-#     # Load best model
-#     model.load_state_dict(torch.load('best_bathymetry_model.pth', map_location=device))
-#     print(f"Training complete. Best validation loss: {best_val_loss:.6f}")
-
-#     plt.figure(figsize=(10, 6))
-#     plt.plot(train_losses, label='Training Loss', alpha=0.8)
-#     plt.plot(val_losses, label='Validation Loss', alpha=0.8)
-#     plt.xlabel('Epoch')
-#     plt.ylabel('Loss')
-#     plt.title('Training and Validation Loss')
-#     plt.legend()
-#     plt.grid(True, alpha=0.3)
-#     plt.savefig('training_curves.png', dpi=300, bbox_inches='tight')
-#     plt.close()
-#     print(f"Training curves saved: training_curves.png")
-
-def train_model(model, train_loader, val_loader, num_epochs=300, model_name=None):
+def train_model(model, train_loader, val_loader, num_epochs=300, model_name="bathymetry"):
     """Train the model with early stopping."""
     device = get_device()
     model.to(device)
@@ -733,7 +866,6 @@ def predict_with_model(model, intensities, device):
 
     # Combine classification and regression outputs
     class_preds = torch.argmax(class_logits, dim=1).cpu()
-
     angle_preds = angle_preds.cpu()
 
     prediction = angle_preds.clone()
@@ -746,165 +878,6 @@ def predict_with_model(model, intensities, device):
     prediction[class_preds == 2] = -20.0  # Flag -20 positions
 
     return prediction, class_logits.cpu(), angle_preds
-
-# def test_specific_rows(model, dataset, num_test_rows=5, output_dir='test_outputs'):
-#     """Test model on specific rows and save results."""
-#     ensure_dir(output_dir)
-#     device = get_device()
-#     model.to(device).eval()
-
-#     test_indices = list(range(min(num_test_rows, len(dataset))))
-#     results = {}
-
-#     print(f"\nTesting {len(test_indices)} samples...")
-
-#     with torch.no_grad():
-#         for i in test_indices:
-#             intensities, ground_truth_raw = dataset[i]
-#             actual_idx = dataset.indices[i] if hasattr(dataset, 'indices') else i
-
-#             # Make prediction
-#             prediction, class_logits, angle_preds = predict_with_model(model, intensities, device)
-
-#             prediction = prediction.squeeze(0)
-
-#             ########
-#             # Get predicted classes
-#             class_preds = torch.argmax(class_logits, dim=1).squeeze(0)  # [2672]
-
-#             # Create ground truth classes
-#             gt_classes = torch.zeros_like(ground_truth_raw, dtype=torch.long)
-#             gt_classes[ground_truth_raw == -10.0] = 1
-#             gt_classes[ground_truth_raw == -20.0] = 2
-
-#             # Reshape classes for each phi (4 beams)
-#             pred_classes_reshaped = torch.zeros(4, 668)
-#             gt_classes_reshaped = torch.zeros(4, 668)
-#             for j in range(4):
-#                 pred_classes_reshaped[j, :] = class_preds[j::4]
-#                 gt_classes_reshaped[j, :] = gt_classes[j::4]
-#             ##########
-
-#             # Evaluate
-#             row_metrics = evaluate_single_row(prediction, ground_truth_raw)
-
-#             # Print clean summary
-#             print(f"Sample {i:2d} (CSV row {actual_idx:4d}) | "
-#                   f"Angle RMSE: {row_metrics['angle_rmse']:6.3f} | "
-#                   f"Flag Acc: {row_metrics['flag_acc']:5.1%} | "
-#                   f"Valid: {row_metrics['clean_points']:3d}/{row_metrics['valid_points']:3d}")
-
-#             # Reshape for visualization
-#             pred_tangents, pred_phis = reshape_predictions(prediction)
-#             gt_processed, _ = create_valid_mask(ground_truth_raw)
-#             gt_tangents, gt_phis = reshape_predictions(gt_processed)
-
-#             # Store results
-#             results[i] = {
-#                 'intensities': intensities.numpy(),
-#                 'pred_tangents': pred_tangents.numpy(),
-#                 'pred_phis': pred_phis.numpy(),
-#                 'gt_tangents': gt_tangents.numpy(),
-#                 'gt_phis': gt_phis.numpy(),
-#                 'classes_phi': class_logits.numpy(),
-#                 'pred_classes': pred_classes_reshaped.numpy(),
-#                 'gt_classes': gt_classes_reshaped.numpy(),
-#                 'metrics': row_metrics
-#             }
-
-#             # Save CSV
-#             data = {'pixel_idx': range(668), 'intensities': intensities.numpy()}
-#             for j in range(4):
-#                 data[f'pred_phi_{j}'] = pred_phis.numpy()[j]
-#                 data[f'gt_phi_{j}'] = gt_phis.numpy()[j]
-#                 # For tangent mode, add:
-#                 data[f'pred_tangent_{j}'] = pred_tangents.numpy()[j]
-#                 data[f'gt_tangent_{j}'] = gt_tangents.numpy()[j]
-
-#             pd.DataFrame(data).to_csv(f'{output_dir}/row_{actual_idx}_predictions.csv', index=False)
-
-#     print(f"Results saved to {output_dir}/")
-#     return results
-
-# def test_specific_rows(model, dataset, num_test_rows=5, output_dir='test_outputs', prediction_type=None):
-#     """Test model on specific rows and save results."""
-#     ensure_dir(output_dir)
-#     device = get_device()
-#     model.to(device).eval()
-
-#     test_indices = list(range(min(num_test_rows, len(dataset))))
-#     results = {}
-
-#     print(f"\nTesting {len(test_indices)} samples for {prediction_type}...")
-
-#     with torch.no_grad():
-#         for i in test_indices:
-#             intensities, ground_truth_raw = dataset[i]
-#             actual_idx = dataset.indices[i] if hasattr(dataset, 'indices') else i
-
-#             # Make prediction
-#             prediction, class_logits, angle_preds = predict_with_model(model, intensities, device)
-#             prediction = prediction.squeeze(0)
-
-#             # Get predicted classes
-#             class_preds = torch.argmax(class_logits, dim=1).squeeze(0)  # [2672]
-
-#             # Create ground truth classes
-#             gt_classes = torch.zeros_like(ground_truth_raw, dtype=torch.long)
-#             gt_classes[ground_truth_raw == -10.0] = 1
-#             gt_classes[ground_truth_raw == -20.0] = 2
-
-#             # Reshape classes for each beam (4 beams)
-#             pred_classes_reshaped = torch.zeros(4, 668)
-#             gt_classes_reshaped = torch.zeros(4, 668)
-#             for j in range(4):
-#                 pred_classes_reshaped[j, :] = class_preds[j::4]
-#                 gt_classes_reshaped[j, :] = gt_classes[j::4]
-
-#             # Evaluate
-#             row_metrics = evaluate_single_row(prediction, ground_truth_raw)
-
-#             # Print clean summary
-#             print(f"Sample {i:2d} (CSV row {actual_idx:4d}) | "
-#                   f"Angle RMSE: {row_metrics['angle_rmse']:6.3f} | "
-#                   f"Flag Acc: {row_metrics['flag_acc']:5.1%} | "
-#                   f"Valid: {row_metrics['clean_points']:3d}/{row_metrics['valid_points']:3d}")
-
-#             # Reshape for visualization - USE THE PREDICTION_TYPE PARAMETER
-#             pred_tangents, pred_phis = reshape_predictions(prediction, prediction_type=prediction_type)
-#             gt_processed, _ = create_valid_mask(ground_truth_raw)
-#             gt_tangents, gt_phis = reshape_predictions(gt_processed, prediction_type=prediction_type)
-
-#             # Store results
-#             results[i] = {
-#                 'intensities': intensities.numpy(),
-#                 'pred_tangents': pred_tangents.numpy(),
-#                 'pred_phis': pred_phis.numpy(),
-#                 'gt_tangents': gt_tangents.numpy(),
-#                 'gt_phis': gt_phis.numpy(),
-#                 'classes_phi': class_logits.numpy(),
-#                 'pred_classes': pred_classes_reshaped.numpy(),
-#                 'gt_classes': gt_classes_reshaped.numpy(),
-#                 'metrics': row_metrics,
-#                 'prediction_type': prediction_type
-#             }
-
-#             # Save CSV
-#             data = {'pixel_idx': range(668), 'intensities': intensities.numpy()}
-#             for j in range(4):
-#                 if prediction_type in ['phi', 'combined']:
-#                     data[f'pred_phi_{j}'] = pred_phis.numpy()[j]
-#                     data[f'gt_phi_{j}'] = gt_phis.numpy()[j]
-#                 if prediction_type in ['tangent', 'combined']:
-#                     data[f'pred_tangent_{j}'] = pred_tangents.numpy()[j]
-#                     data[f'gt_tangent_{j}'] = gt_tangents.numpy()[j]
-#                 else:
-#                     print("No valid Prediction type passed to inference")
-
-#             pd.DataFrame(data).to_csv(f'{output_dir}/row_{actual_idx}_predictions.csv', index=False)
-
-#     print(f"Results saved to {output_dir}/")
-#     return results
 
 def test_specific_rows(model, dataset, num_test_rows, output_dir, prediction_type):
     """Test model on specific rows and save results."""
@@ -992,22 +965,20 @@ def visualize_predictions(results, terrain_data=None, show_plots=True):
         return
 
     for i, result in results.items():
-        # fig, axes = plt.subplots(2, 4, figsize=(16, 6), sharex=True, sharey=True)
-        # fig, axes = plt.subplots(3, 4, figsize=(16, 9), sharex=True)
         fig, axes = plt.subplots(4, 4, figsize=(16, 9), sharex=True)
 
         pred_tangents = result['pred_tangents']
         pred_phis = result['pred_phis']
+        first_column = pred_phis[3, 108]
+        print("Predicted Phis--------", first_column)
         gt_tangents = result['gt_tangents']
         gt_phis = result['gt_phis']
-        # classes_phi = result['classes_phi']
-
+        # range_val = min_range + (reverse_idx / 668) * (max_range - min_range)
 
         for j in range(4):
             # Tangents (disabled but structure preserved)
             axes[0, j].scatter(range(668), pred_tangents[j], s=9, alpha=0.7, label='pred')
             axes[0, j].scatter(range(668), gt_tangents[j], s=2, marker='x', alpha=0.7, label='gt')
-
             axes[0, j].set_title(f"Tangent {j+1}")
             if j == 0: axes[0, j].legend()
 
@@ -1046,228 +1017,141 @@ def visualize_terrain_comparison(results, terrain_data):
     print("TERRAIN SPATIAL VISUALIZATION")
     print(f"{'='*50}")
 
-    # for i in range(len(results)):
-    #     result = results[i]
-    #     chunk_idx = i * 10  # Simple mapping - adjust as needed
-
-    #     if chunk_idx not in terrain_data:
-    #         print(f"No terrain data for chunk {chunk_idx}, skipping sample {i}")
-    #         continue
-
-    #     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
-
-    #     # Get real coordinates and angles from terrain data
-    #     x_coords = terrain_data[chunk_idx]['x']
-    #     z_coords = terrain_data[chunk_idx]['z']
-    #     real_tangents = terrain_data[chunk_idx]['tangent']
-    #     real_normals = terrain_data[chunk_idx]['normal']
-
-    #     # Plot terrain points
-    #     ax1.scatter(x_coords, z_coords, s=4, c='blue', alpha=0.6, label='Terrain Points')
-    #     ax2.scatter(x_coords, z_coords, s=4, c='blue', alpha=0.6, label='Terrain Points')
-
-    #     # Draw angle arrows at each point
-    #     for j in range(0, len(x_coords), 1):
-    #         x_pos, z_pos = x_coords[j], z_coords[j]
-
-    #         # CNN predicted angles (left plot)
-    #         # if j < result['pred_phis'].shape[1]:
-    #         #     cnn_idx = j
-    #         #     pred_phi = result['pred_phis'][0, cnn_idx]
-
-    #         # if j < result['pred_phis'].shape[1] * result['pred_phis'].shape[0]:  # Total predictions available
-    #         #     beam_idx = j // 668  # Which beam (0-3)
-    #         #     pixel_idx = j % 668  # Which pixel within beam (0-667)
-    #         #     if beam_idx < 4:  # Valid beam
-    #         #         pred_phi = result['pred_phis'][beam_idx, pixel_idx]
-    #         #         print(pred_phi)
-    #         if j < result['pred_phis'].shape[1]:  # Only use beam 0's 668 pixels
-    #             pixel_idx = j * 4  # Sample every 4th pixel: 0, 4, 8, 12...
-    #             if pixel_idx < 668:  # Stay within beam bounds
-    #                 pred_phi = result['pred_phis'][0, pixel_idx]  # Always beam 0
-    #                 print(f"j={j}, pixel_idx={pixel_idx}, pred_phi={pred_phi}")
-    #             ax1.arrow(x_pos, z_pos, math.cos(pred_phi)*0.2, math.sin(pred_phi)*0.2,
-    #                         head_width=0.05, color='red', length_includes_head=True, alpha=0.8)
-
-    #             # For tangent mode, uncomment:
-    #             # pred_tang = result['pred_tangents'][0, cnn_idx]
-    #             # if pred_tang not in [-10.0, -20.0]:
-    #             #     ax1.arrow(x_pos, z_pos, math.cos(pred_tang)*0.2, math.sin(pred_tang)*0.2,
-    #             #              head_width=0.05, color='green', length_includes_head=True, alpha=0.8)
-
-    #         # Real terrain angles (right plot)
-    #         ax2.arrow(x_pos, z_pos, math.cos(real_normals[j])*0.2, math.sin(real_normals[j])*0.2,
-    #                  head_width=0.05, color='red', length_includes_head=True, alpha=0.8)
-    #         ax2.arrow(x_pos, z_pos, math.cos(real_tangents[j])*0.2, math.sin(real_tangents[j])*0.2,
-    #                  head_width=0.05, color='green', length_includes_head=True, alpha=0.8)
-
-    #     # Mark sensor position
-    #     ax1.plot(0, 0, 'x', markersize=10, color='black', markeredgewidth=2, label='Sensor')
-    #     ax2.plot(0, 0, 'x', markersize=10, color='black', markeredgewidth=2, label='Sensor')
-
-    #     # Configure plots
-    #     ax1.set_title("CNN Predicted Angles")
-    #     ax1.axis('equal')
-    #     ax1.grid(True, alpha=0.3)
-    #     ax1.legend()
-
-    #     ax2.set_title("Real Terrain Angles")
-    #     ax2.axis('equal')
-    #     ax2.grid(True, alpha=0.3)
-    #     ax2.legend()
-
-    #     plt.suptitle(f"Sample {i} - Spatial Angle Comparison (Red=Phi/Normal, Green=Tangent)")
-    #     plt.tight_layout()
-    #     plt.show()
-
-        # print(f"Visualized sample {i} using terrain chunk {chunk_idx}")
-
 # ==================== MAIN EXECUTION ====================
 
 def main():
     # Setup
     csv_file = '/Users/farhang/Downloads/fls_all_with_phi.csv'
 
-    # dataset = BathymetryDataset(csv_file)
-
-    phi_dataset = BathymetryPhiDataset(csv_file)
-    tangent_dataset = BathymetryTangentDataset(csv_file)
+    # Create datasets for different prediction types
+    phi_dataset = BathymetryDataset(csv_file, prediction_type='phi')
+    tangent_dataset = BathymetryDataset(csv_file, prediction_type='tangent')
 
     print(f"Phi Dataset loaded: {len(phi_dataset)} samples")
     print(f"Tangent Dataset loaded: {len(tangent_dataset)} samples")
 
-    # Create data splits
-    # train_dataset, val_dataset, test_dataset = create_data_splits(dataset)
-    # print(f"Data splits - Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
-
-    phi_train, phi_val, phi_test = create_data_splits(phi_dataset)
-    tangent_train, tangent_val, tangent_test = create_data_splits(tangent_dataset, seed=42)
-
-    print(f"Phi splits - Train: {len(phi_train)}, Val: {len(phi_val)}, Test: {len(phi_test)}")
-    print(f"Tangent splits - Train: {len(tangent_train)}, Val: {len(tangent_val)}, Test: {len(tangent_test)}")
-
-    # # Create data loaders
-    # train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    # val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
-    # test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
-
-    # Create data loaders for BOTH
-    phi_train_loader = DataLoader(phi_train, batch_size=32, shuffle=True)
-    phi_val_loader = DataLoader(phi_val, batch_size=32, shuffle=False)
-    phi_test_loader = DataLoader(phi_test, batch_size=32, shuffle=False)
-
-    tangent_train_loader = DataLoader(tangent_train, batch_size=32, shuffle=True)
-    tangent_val_loader = DataLoader(tangent_val, batch_size=32, shuffle=False)
-    tangent_test_loader = DataLoader(tangent_test, batch_size=32, shuffle=False)
-
-    # Initialize model
-    # model = IntensityToBathymetryUNet1D()
-
-    # Training (uncomment to train)
-    # train_model(model, train_loader, val_loader, num_epochs=130)
-
-    phi_model = IntensityToBathymetryPhiUNet1D()
-    tangent_model = IntensityToBathymetryTangentsUNet1D()
-
-    # print("Training PHI network...")
-    # train_model(phi_model, phi_train_loader, phi_val_loader, num_epochs=60, model_name="phi")
-
-    # print("Training TANGENT network...")
-    # train_model(tangent_model, tangent_train_loader, tangent_val_loader, num_epochs=60,model_name="tangent")
+    # Handle data splits
+    splits_dir = "./data_splits"
+    if os.path.exists(f"{splits_dir}/train_data.csv"):
+        print("Using existing CSV splits...")
+        train_csv = f"{splits_dir}/train_data.csv"
+        val_csv = f"{splits_dir}/val_data.csv"
+        test_csv = f"{splits_dir}/test_data.csv"
+    else:
+        print("Creating new splits and saving to CSV...")
+        train_csv, val_csv, test_csv = save_splits_to_csv(csv_file, splits_dir)
 
 
 
-    # Load existing model
-    # try:
-    #     model.load_state_dict(torch.load('best_bathymetry_model.pth', map_location=get_device()))
-    #     print("Loaded existing trained model")
-    # except FileNotFoundError:
-    #     print("No existing model found - using untrained model")
+    # Create datasets for each split and prediction type
+    datasets = {}
+    for pred_type in ['phi', 'tangent']:
+        datasets[pred_type] = {
+            'train': BathymetryDataset(train_csv, prediction_type=pred_type),
+            'val': BathymetryDataset(val_csv, prediction_type=pred_type),
+            'test': BathymetryDataset(test_csv, prediction_type=pred_type)
+        }
 
-    try:
-        phi_model.load_state_dict(torch.load('best_bathymetry_model_phi.pth', map_location=get_device()))
-        print("Loaded existing PHI model")
-    except FileNotFoundError:
-        print("No existing PHI model found")
+    print(f"Phi splits - Train: {len(datasets['phi']['train'])}, Val: {len(datasets['phi']['val'])}, Test: {len(datasets['phi']['test'])}")
+    print(f"Tangent splits - Train: {len(datasets['tangent']['train'])}, Val: {len(datasets['tangent']['val'])}, Test: {len(datasets['tangent']['test'])}")
 
-    try:
-        tangent_model.load_state_dict(torch.load('best_bathymetry_model_tangent.pth', map_location=get_device()))
-        print("Loaded existing TANGENT model")
-    except FileNotFoundError:
-        print("No existing TANGENT model found")
+    # Create data loaders
+    loaders = {}
+    for pred_type in ['phi', 'tangent']:
+        loaders[pred_type] = {
+            'train': DataLoader(datasets[pred_type]['train'], batch_size=32, shuffle=True),
+            'val': DataLoader(datasets[pred_type]['val'], batch_size=32, shuffle=False),
+            'test': DataLoader(datasets[pred_type]['test'], batch_size=32, shuffle=False)
+        }
+
+    # Initialize and train models
+    models = {}
+    for pred_type in ['phi', 'tangent']:
+        print(f"\nInitializing {pred_type.upper()} network...")
+        model = IntensityToBathymetryUNet1D(prediction_type=pred_type)
+
+        # Training (uncomment to train)
+        print(f"Training {pred_type.upper()} network...")
+        train_model(model, loaders[pred_type]['train'], loaders[pred_type]['val'],
+                   num_epochs=100, model_name=pred_type)
+
+        # Load existing model
+        try:
+            model.load_state_dict(torch.load(f'best_bathymetry_model_{pred_type}.pth', map_location=get_device()))
+            print(f"Loaded existing {pred_type.upper()} model")
+        except FileNotFoundError:
+            print(f"No existing {pred_type.upper()} model found")
+
+        models[pred_type] = model
 
     # Evaluation
     print(f"\n{'='*50}")
     print("MODEL EVALUATION")
     print(f"{'='*50}")
 
-    # test_loss = evaluate_model(model, test_loader)
-    # print(f"Test Loss: {test_loss:.6f}")
-
-    phi_test_loss = evaluate_model(phi_model, phi_test_loader)
-    tangent_test_loss = evaluate_model(tangent_model, tangent_test_loader)
-
-    print(f"Phi Test Loss: {phi_test_loss:.6f}")
-    print(f"Tangent Test Loss: {tangent_test_loss:.6f}")
+    for pred_type in ['phi', 'tangent']:
+        test_loss = evaluate_model(models[pred_type], loaders[pred_type]['test'])
+        print(f"{pred_type.title()} Test Loss: {test_loss:.6f}")
 
     # Test specific rows
-    # print(f"\n{'='*50}")
-    # print("DETAILED TESTING")
-    # print(f"{'='*50}")
+    results = {}
+    for pred_type in ['phi', 'tangent']:
+        print(f"\n{'='*50}")
+        print(f"DETAILED TESTING - {pred_type.upper()} NETWORK")
+        print(f"{'='*50}")
 
-    print(f"\n{'='*50}")
-    print("DETAILED TESTING - PHI NETWORK")
-    print(f"{'='*50}")
+        results[pred_type] = test_specific_rows(
+            models[pred_type],
+            datasets[pred_type]['test'],
+            # num_test_rows=len(datasets[pred_type]['test']),
+            num_test_rows= 1,
+            output_dir=f'test_outputs_{pred_type}',
+            prediction_type=pred_type
+        )
 
-    phi_results = test_specific_rows(phi_model, phi_test, num_test_rows=5,
-                                output_dir='test_outputs_phi',
-                                prediction_type='phi')
-
-    print(f"\n{'='*50}")
-    print("DETAILED TESTING - TANGENT NETWORK")
-    print(f"{'='*50}")
-    tangent_results = test_specific_rows(tangent_model, tangent_test, num_test_rows=5,
-                                   output_dir='test_outputs_tangents',
-                                   prediction_type='tangent')
-
-    # test_results = test_specific_rows(model, test_dataset, num_test_rows=10)
-
-    # #Load terrain data and visualize
-    # terrain_data = load_terrain_coordinates()
-    # if terrain_data:
-    #     print(f"Loaded terrain data: {len(terrain_data)} chunks")
-
-    # # Standard prediction visualization
-    # visualize_predictions(test_results, terrain_data, show_plots=True)
-
-    # # Terrain spatial visualization (shows physical angle relationships)
-    # visualize_terrain_comparison(test_results, terrain_data)
-
-    # print("Visualizing PHI predictions...")
-    # visualize_predictions(phi_results, show_plots=True)
-
+    # Visualization (uncomment to show plots)
+    print("Visualizing PHI predictions...")
+    visualize_predictions(results['phi'], show_plots=True)
     # print("Visualizing TANGENT predictions...")
-    # visualize_predictions(tangent_results, show_plots=True)
+    # visualize_predictions(results['tangent'], show_plots=True)
 
-    # # Save model
-    # phi_model_path = 'bathymetry_cnn_model_phi.pth'
-    # tangent_model_path = 'bathymetry_cnn_model_tangent.pth'
+    # # Save models
+    # ensure_dir('./models')
+    # for pred_type in ['phi', 'tangent']:
+    #     model_path = f'./models/bathymetry_cnn_model_{pred_type}.pth'
+    #     torch.save(models[pred_type].state_dict(), model_path)
+    #     print(f"{pred_type.title()} model saved: {model_path}")
 
-    # torch.save(phi_model.state_dict(), phi_model_path)
-    # torch.save(tangent_model.state_dict(), tangent_model_path)
+    # # Save predictions to CSV
+    # original_csv_path = "/Users/farhang/Downloads/fls_all_with_phi.csv"
+    # output_csv_path = "/Users/farhang/Downloads/fls_2d_terrain_prediction_output.csv"
+    # save_predictions_to_csv(results['tangent'], results['phi'], original_csv_path, output_csv_path)
 
-    # print(f"\nModels saved:")
-    # print(f"- Phi model: {phi_model_path}")
-    # print(f"- Tangent model: {tangent_model_path}")
+    # test_with_indices = save_splits_with_indices_to_csv(csv_file, splits_dir)
+    # train_with_indices = save_splits_with_indices_to_csv(csv_file, splits_dir)
 
-    # model_path = 'bathymetry_cnn_model.pth'
-    # torch.save(model.state_dict(), model_path)
-    # print(f"\nModel saved: {model_path}")
+    # predictions_with_indices_path = "./data_splits/test_predictions_with_indices.csv"
+    # save_predictions_with_indices_to_csv(
+    #     results['tangent'],
+    #     results['phi'],
+    #     test_with_indices,
+    #     predictions_with_indices_path
+    # )
 
+    # predictions_with_indices_path = "./data_splits/train_predictions_with_indices.csv"
+    # save_predictions_with_indices_to_csv(
+    #     results['tangent'],
+    #     results['phi'],
+    #     train_with_indices,
+    #     predictions_with_indices_path
+    # )
 
-    original_csv_path = "/Users/farhang/Downloads/fls_all_with_phi.csv"  # actual file path
-    output_csv_path = "/Users/farhang/Downloads/fls_2d_terrain_prediction_output.csv"  #output file
-    save_predictions_to_csv(tangent_results, phi_results, original_csv_path, output_csv_path)
+    # # Generate comparison plots
+    # save_test_indices_vs_original_pcl_plots(
+    #     test_csv_path=predictions_with_indices_path,
+    #     original_csv_path="/Users/farhang/Downloads/fls_all_with_phi.csv",
+    #     output_dir="./test_indices_vs_original"
+    # )
 
 if __name__ == "__main__":
     main()

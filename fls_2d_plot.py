@@ -3,10 +3,13 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import math
 import time
+from os import makedirs
+
+makedirs('./saved', exist_ok=True)
 
 # Set to True for animation, False for single frame
 ANIMATE = True
-FRAME_DELAY = 0.05  # seconds between frames
+FRAME_DELAY = 0.005  # seconds between frames
 
 # Read file and split by chunks (separated by empty lines)
 chunks = []
@@ -57,12 +60,12 @@ def plot_chunk(chunk_idx, chunks):
         tangent_vec = [math.cos(tangent[i]), math.sin(tangent[i])]
         incident_vec = [x[i], z[i]]
 
-        # normal
-        plt.arrow(x[i], z[i], normal_vec[0]*0.2, normal_vec[1]*0.2,
-                  head_width=0.05, color='red', length_includes_head=True)
-        # tangent
-        plt.arrow(x[i], z[i], tangent_vec[0]*0.2, tangent_vec[1]*0.2,
-                  head_width=0.05, color='green', length_includes_head=True)
+        # # normal
+        # plt.arrow(x[i], z[i], normal_vec[0]*0.2, normal_vec[1]*0.2,
+        #           head_width=0.05, color='red', length_includes_head=True)
+        # # tangent
+        # plt.arrow(x[i], z[i], tangent_vec[0]*0.2, tangent_vec[1]*0.2,
+        #           head_width=0.05, color='green', length_includes_head=True)
         # incident
         # plt.arrow(0, 0, incident_vec[0], incident_vec[1],
         #           head_width=0.05, color='black', length_includes_head=True)
@@ -82,11 +85,11 @@ if ANIMATE:
         for chunk_idx in range(len(chunks)):
             plot_chunk(chunk_idx, chunks)
             plt.draw()
-            # plt.savefig(f'/Users/farhang/Downloads/saved/frame_{chunk_idx:03d}.png', dpi=300, bbox_inches='tight')
+            plt.savefig(f'./saved/frame_{chunk_idx:03d}.png', dpi=300, bbox_inches='tight')
             plt.pause(FRAME_DELAY)
 else:
     # Single frame mode - choose which chunk to plot
-    CHUNK_TO_PLOT = 402
+    CHUNK_TO_PLOT = 236
     plt.figure(figsize=(6, 6))
     plot_chunk(CHUNK_TO_PLOT, chunks)
     plt.show()
