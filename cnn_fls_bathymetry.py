@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 
 import csv
+
+
 # ==================== UTILITIES ====================
 
 def get_device():
@@ -265,7 +267,7 @@ def save_splits_to_csv(csv_file, base_dir="./data_splits"):
     lines = [line.rstrip('\n\r') for line in lines]
 
     # Create indices for splitting (same random seed logic)
-    np.random.seed(42)
+    np.random.seed(23)
     indices = np.arange(len(lines))
 
     # Split indices instead of dataframe
@@ -565,12 +567,12 @@ class ResidualBlock1D(nn.Module):
         self.block = nn.Sequential(
             nn.Conv1d(channels, channels, 3, padding=1),
             nn.InstanceNorm1d(channels),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(inplace=True),
             nn.Dropout(dropout_rate),
             nn.Conv1d(channels, channels, 3, padding=1),
             nn.InstanceNorm1d(channels),
         )
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.LeakyReLU(inplace=True)
 
     def forward(self, x):
         return self.relu(self.block(x) + x)
@@ -582,16 +584,16 @@ class IntensityToBathymetryUNet1D(nn.Module):
 
         # Encoder
         self.enc1 = nn.Sequential(
-            nn.Conv1d(1, 64, 7, padding=3),
-            nn.InstanceNorm1d(64), nn.ReLU()
+            nn.Conv1d(1, 64, 3, padding=1),
+            nn.InstanceNorm1d(64), nn.LeakyReLU()
         )
         self.enc2 = nn.Sequential(
             nn.Conv1d(64, 128, 5, stride=2, padding=2),
-            nn.InstanceNorm1d(128), nn.ReLU()
+            nn.InstanceNorm1d(128), nn.LeakyReLU()
         )
         self.enc3 = nn.Sequential(
-            nn.Conv1d(128, 256, 3, stride=2, padding=1),
-            nn.InstanceNorm1d(256), nn.ReLU()
+            nn.Conv1d(128, 256, 7   , stride=2, padding=3),
+            nn.InstanceNorm1d(256), nn.LeakyReLU()
         )
 
         # Bottleneck
@@ -601,18 +603,18 @@ class IntensityToBathymetryUNet1D(nn.Module):
 
         # Decoder with skip connections
         self.dec1 = nn.Sequential(
-            nn.ConvTranspose1d(256, 128, 3, stride=2, padding=1, output_padding=1),
-            nn.InstanceNorm1d(128), nn.ReLU()
+            nn.ConvTranspose1d(256, 128, 7, stride=2, padding=3, output_padding=1),
+            nn.InstanceNorm1d(128), nn.LeakyReLU()
         )
         self.dec2 = nn.Sequential(
             nn.ConvTranspose1d(256, 64, 5, stride=2, padding=2, output_padding=1),
-            nn.InstanceNorm1d(64), nn.ReLU()
+            nn.InstanceNorm1d(64), nn.LeakyReLU()
         )
 
         # Final upsampling
         self.final_upsample = nn.Sequential(
-            nn.ConvTranspose1d(128, 32, 7, stride=4, padding=3, output_padding=3),
-            nn.ReLU(),
+            nn.ConvTranspose1d(128, 32, 3, stride=4, padding=1, output_padding=3),
+            nn.LeakyReLU(),
         )
 
         # Dual heads for classification and regression
@@ -739,7 +741,7 @@ class SequenceBathymetryLoss(nn.Module):
         class_labels = torch.zeros_like(targets, dtype=torch.long)
         class_labels[flag_10_mask] = 1
         class_labels[flag_20_mask] = 2
-        print("Classs Label shape",class_labels.shape)
+        # print("Classs Label shape",class_labels.shape)
 
         # Classification loss for all positions
         class_logits = class_logits.permute(0, 2, 1)  # [B, 2672, 3]
@@ -747,7 +749,7 @@ class SequenceBathymetryLoss(nn.Module):
             class_logits.reshape(-1, 3),
             class_labels.reshape(-1)
         )
-        print("Classs Logit shape",class_logits.shape)
+        # print("Classs Logit shape",class_logits.shape)
 
         # Regression loss only for valid positions
         reg_loss = F.mse_loss(angle_preds[valid_mask], targets[valid_mask]) if valid_mask.any() else torch.tensor(0.0, device=targets.device)
@@ -1020,8 +1022,19 @@ def visualize_terrain_comparison(results, terrain_data):
 # ==================== MAIN EXECUTION ====================
 
 def main():
+
+    print("Cleaning up old model files...")
+    for model_file in ['best_bathymetry_model_phi.pth',
+                       'best_bathymetry_model_tangent.pth']:
+        if os.path.exists(model_file):
+            os.remove(model_file)
+            print(f"  ✓ Deleted {model_file}")
+        else:
+            print(f"  - {model_file} not found (OK)")
+
     # Setup
     csv_file = '/Users/farhang/Downloads/fls_all_with_phi.csv'
+    # csv_file = '/Users/farhang/Downloads/fls_all_with_phis_long.csv'
 
     # Create datasets for different prediction types
     phi_dataset = BathymetryDataset(csv_file, prediction_type='phi')
@@ -1040,8 +1053,6 @@ def main():
     else:
         print("Creating new splits and saving to CSV...")
         train_csv, val_csv, test_csv = save_splits_to_csv(csv_file, splits_dir)
-
-
 
     # Create datasets for each split and prediction type
     datasets = {}
@@ -1073,7 +1084,7 @@ def main():
         # Training (uncomment to train)
         print(f"Training {pred_type.upper()} network...")
         train_model(model, loaders[pred_type]['train'], loaders[pred_type]['val'],
-                   num_epochs=100, model_name=pred_type)
+                   num_epochs=40, model_name=pred_type)
 
         # Load existing model
         try:
@@ -1103,50 +1114,50 @@ def main():
         results[pred_type] = test_specific_rows(
             models[pred_type],
             datasets[pred_type]['test'],
-            # num_test_rows=len(datasets[pred_type]['test']),
-            num_test_rows= 1,
+            num_test_rows=len(datasets[pred_type]['test']),
+            # num_test_rows= 5,
             output_dir=f'test_outputs_{pred_type}',
             prediction_type=pred_type
         )
 
     # Visualization (uncomment to show plots)
-    print("Visualizing PHI predictions...")
-    visualize_predictions(results['phi'], show_plots=True)
+    # print("Visualizing PHI predictions...")
+    # visualize_predictions(results['phi'], show_plots=True)
     # print("Visualizing TANGENT predictions...")
     # visualize_predictions(results['tangent'], show_plots=True)
 
-    # # Save models
-    # ensure_dir('./models')
-    # for pred_type in ['phi', 'tangent']:
-    #     model_path = f'./models/bathymetry_cnn_model_{pred_type}.pth'
-    #     torch.save(models[pred_type].state_dict(), model_path)
-    #     print(f"{pred_type.title()} model saved: {model_path}")
+    # Save models
+    ensure_dir('./models')
+    for pred_type in ['phi', 'tangent']:
+        model_path = f'./models/bathymetry_cnn_model_{pred_type}.pth'
+        torch.save(models[pred_type].state_dict(), model_path)
+        print(f"{pred_type.title()} model saved: {model_path}")
 
     # # Save predictions to CSV
     # original_csv_path = "/Users/farhang/Downloads/fls_all_with_phi.csv"
     # output_csv_path = "/Users/farhang/Downloads/fls_2d_terrain_prediction_output.csv"
     # save_predictions_to_csv(results['tangent'], results['phi'], original_csv_path, output_csv_path)
 
-    # test_with_indices = save_splits_with_indices_to_csv(csv_file, splits_dir)
-    # train_with_indices = save_splits_with_indices_to_csv(csv_file, splits_dir)
+    test_with_indices = save_splits_with_indices_to_csv(csv_file, splits_dir)
+    train_with_indices = save_splits_with_indices_to_csv(csv_file, splits_dir)
 
-    # predictions_with_indices_path = "./data_splits/test_predictions_with_indices.csv"
-    # save_predictions_with_indices_to_csv(
-    #     results['tangent'],
-    #     results['phi'],
-    #     test_with_indices,
-    #     predictions_with_indices_path
-    # )
+    predictions_with_indices_path = "./data_splits/test_predictions_with_indices.csv"
+    save_predictions_with_indices_to_csv(
+        results['tangent'],
+        results['phi'],
+        test_with_indices,
+        predictions_with_indices_path
+    )
 
-    # predictions_with_indices_path = "./data_splits/train_predictions_with_indices.csv"
-    # save_predictions_with_indices_to_csv(
-    #     results['tangent'],
-    #     results['phi'],
-    #     train_with_indices,
-    #     predictions_with_indices_path
-    # )
+    predictions_with_indices_path = "./data_splits/train_predictions_with_indices.csv"
+    save_predictions_with_indices_to_csv(
+        results['tangent'],
+        results['phi'],
+        train_with_indices,
+        predictions_with_indices_path
+    )
 
-    # # Generate comparison plots
+    # Generate comparison plots
     # save_test_indices_vs_original_pcl_plots(
     #     test_csv_path=predictions_with_indices_path,
     #     original_csv_path="/Users/farhang/Downloads/fls_all_with_phi.csv",

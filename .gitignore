@@ -42,6 +42,7 @@ data_splits/
 test_*
 class_pred*
 saved/
+phi_similarity_*
 
 # =========================
 # Node.js
