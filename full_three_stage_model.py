@@ -15,7 +15,7 @@ import csv
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, confusion_matrix, f1_score, precision_score, recall_score
-
+import math
 
 # ==============================================================================
 # UTILITY FUNCTIONS (Copied from cnn_separate_fls_bathymetry_separate.py)
@@ -453,7 +453,7 @@ class Neg20Detector(nn.Module):
 
 
 class PureTransformerBinaryClassifier(nn.Module):
-    def __init__(self, d_model=128, nhead=8, num_layers=2, dropout=0.2): # d_model = 128
+    def __init__(self, d_model=128, nhead=8, num_layers=3, dropout=0.2): # d_model = 128
         super().__init__()
 
         self.input_embed = nn.Sequential(
@@ -661,27 +661,153 @@ class FullThreeStageLoss(nn.Module):
 # TRAINING FUNCTIONS
 # ==============================================================================
 
+# def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50):
+#     # choose device (include cuda, mps, cpu)
+#     device = torch.device('cuda' if torch.cuda.is_available() else
+#                           'mps' if torch.backends.mps.is_available() else
+#                           'cpu')
+#     model.to(device)
+
+#     optimizer = torch.optim.AdamW([
+#         {'params': model.neg20_detector.parameters(), 'lr': 1e-4},
+#         {'params': model.valid_vs_neg10_classifier.parameters(), 'lr': 1e-4},
+#         {'params': model.angle_regressor.parameters(), 'lr': 1e-5}
+#     ], weight_decay=1e-4)
+
+#     total_steps = num_epochs * len(train_loader)
+#     if total_steps <= 0:
+#         raise ValueError("total_steps for scheduler must be > 0. "
+#                          "Check that train_loader is not empty and num_epochs > 0.")
+
+#     scheduler = torch.optim.lr_scheduler.OneCycleLR(
+#         optimizer,
+#         max_lr=[1e-4, 1e-4, 1e-5],
+#         total_steps=total_steps,
+#         pct_start=0.3
+#     )
+
+#     criterion = FullThreeStageLoss(alpha_neg20=2.0, alpha_valid_neg10=5.0, beta_reg=1.0)
+
+#     print(f"\n{'='*60}")
+#     print("TRAINING FULL THREE-STAGE MODEL")
+#     print(f"{'='*60}")
+#     print(f"Device: {device}")
+#     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+#     best_val_loss = float('inf')
+
+#     for epoch in range(num_epochs):
+#         model.train()
+#         train_loss = 0.0
+#         train_s1_loss = 0.0
+#         train_s2_loss = 0.0
+#         train_reg_loss = 0.0
+#         step_count = 0
+
+#         for batch in train_loader:
+#             # train_loader yields (intensities, ground_truth)
+#             intensities, ground_truth = batch
+#             intensities = intensities.to(device)
+#             ground_truth = ground_truth.to(device)
+
+#             optimizer.zero_grad()
+
+#             final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded = model(intensities, training=True)
+
+#             # compute loss directly on these padded tensors; loss handles internal masks
+#             loss, s1_loss, s2_loss, reg_loss = criterion(
+#                 final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded, ground_truth
+#             )
+
+#             if torch.isfinite(loss):
+#                 loss.backward()
+#                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+#                 optimizer.step()
+#                 # step the scheduler once per optimizer.step
+#                 scheduler.step()
+
+#                 train_loss += loss.item()
+#                 train_s1_loss += s1_loss.item()
+#                 train_s2_loss += s2_loss.item()
+#                 train_reg_loss += reg_loss.item()
+#                 step_count += 1
+
+#         # avoid division by zero if dataloader had 0 batches
+#         if step_count == 0:
+#             print("Warning: No training steps performed this epoch (train_loader empty?).")
+#             avg_train_loss = avg_s1 = avg_s2 = avg_reg = float('inf')
+#         else:
+#             avg_train_loss = train_loss / step_count
+#             avg_s1 = train_s1_loss / step_count
+#             avg_s2 = train_s2_loss / step_count
+#             avg_reg = train_reg_loss / step_count
+
+#         # VALIDATION
+#         model.eval()
+#         val_loss = 0.0
+#         val_steps = 0
+
+#         with torch.no_grad():
+#             for batch in val_loader:
+#                 intensities, ground_truth = batch
+#                 intensities = intensities.to(device)
+#                 ground_truth = ground_truth.to(device)
+
+#                 final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded = model(intensities, training=True)
+
+#                 # full-batch loss; FullThreeStageLoss internally handles ignoring -20/-10 etc
+#                 loss, _, _, _ = criterion(
+#                     final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded, ground_truth
+#                 )
+
+#                 if torch.isfinite(loss):
+#                     val_loss += loss.item()
+#                     val_steps += 1
+
+#         if val_steps == 0:
+#             avg_val_loss = float('inf')
+#         else:
+#             avg_val_loss = val_loss / val_steps
+
+#         if avg_val_loss < best_val_loss:
+#             best_val_loss = avg_val_loss
+#             torch.save(model.state_dict(), 'best_full_three_stage_model.pth')
+
+#         if epoch % 10 == 0 or epoch < 5:
+#             print(f"Epoch {epoch+1:3d}/{num_epochs} | "
+#                   f"Train: {avg_train_loss:.4f} "
+#                   f"(s1:{avg_s1:.3f}, s2:{avg_s2:.3f}, reg:{avg_reg:.4f}) | "
+#                   f"Val: {avg_val_loss:.4f} | Best: {best_val_loss:.4f}")
+
+#     # load best
+#     model.load_state_dict(torch.load('best_full_three_stage_model.pth', map_location=device))
+#     print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}\n")
+#     return model
+
 def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50):
-    device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+    device = torch.device('cuda' if torch.cuda.is_available() else
+                          'mps' if torch.backends.mps.is_available() else
+                          'cpu')
     model.to(device)
 
-    optimizer = torch.optim.AdamW([
-        {'params': model.neg20_detector.parameters(), 'lr': 1e-4},
-        {'params': model.valid_vs_neg10_classifier.parameters(), 'lr': 1e-4},
-        {'params': model.angle_regressor.parameters(), 'lr': 1e-5}
-    ], weight_decay=1e-4)
+    # SEPARATE optimizers for each stage
+    optimizer_stage1 = torch.optim.AdamW(model.neg20_detector.parameters(), lr=1e-4, weight_decay=1e-4)
+    optimizer_stage2 = torch.optim.AdamW(model.valid_vs_neg10_classifier.parameters(), lr=1e-4, weight_decay=1e-4)
+    optimizer_stage3 = torch.optim.AdamW(model.angle_regressor.parameters(), lr=1e-5, weight_decay=1e-4)
 
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer,
-        max_lr=[1e-4, 1e-4, 1e-5],
-        total_steps=num_epochs * len(train_loader),
-        pct_start=0.3
-    )
+    total_steps = num_epochs * len(train_loader)
+    if total_steps <= 0:
+        raise ValueError("total_steps for scheduler must be > 0.")
+
+    # SEPARATE schedulers for each stage
+    scheduler_stage1 = torch.optim.lr_scheduler.OneCycleLR(optimizer_stage1, max_lr=1e-4, total_steps=total_steps, pct_start=0.3)
+    scheduler_stage2 = torch.optim.lr_scheduler.OneCycleLR(optimizer_stage2, max_lr=1e-4, total_steps=total_steps, pct_start=0.3)
+    scheduler_stage3 = torch.optim.lr_scheduler.OneCycleLR(optimizer_stage3, max_lr=1e-5, total_steps=total_steps, pct_start=0.3)
 
     criterion = FullThreeStageLoss(alpha_neg20=2.0, alpha_valid_neg10=5.0, beta_reg=1.0)
 
     print(f"\n{'='*60}")
-    print("TRAINING FULL THREE-STAGE MODEL")
+    print("TRAINING FULL THREE-STAGE MODEL (SEPARATE LOSSES)")
     print(f"{'='*60}")
     print(f"Device: {device}")
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -694,83 +820,99 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
         train_s1_loss = 0.0
         train_s2_loss = 0.0
         train_reg_loss = 0.0
+        step_count = 0
 
-        for intensities, ground_truth in train_loader:
+        for batch in train_loader:
+            intensities, ground_truth = batch
             intensities = intensities.to(device)
             ground_truth = ground_truth.to(device)
 
-            optimizer.zero_grad()
-
-            # Model outputs on full sequence (padded)
+            # FORWARD PASS
             final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded = model(intensities, training=True)
 
-            # Apply mask to all outputs before computing loss
-            final_preds = final_preds_padded
-            neg20_logits = neg20_logits_padded
-            valid_vs_neg10_logits = valid_vs_neg10_logits_padded
-            angle_preds = angle_preds_padded
-            targets_full = ground_truth
-
+            # COMPUTE ALL LOSSES
             loss, s1_loss, s2_loss, reg_loss = criterion(
-                final_preds, neg20_logits, valid_vs_neg10_logits, angle_preds, targets_full
+                final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded, ground_truth
             )
 
-            if torch.isfinite(loss):
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-                scheduler.step()
+            if torch.isfinite(s1_loss):
+                # STAGE 1: Update Neg20Detector only
+                optimizer_stage1.zero_grad()
+                s1_loss.backward(retain_graph=True)
+                torch.nn.utils.clip_grad_norm_(model.neg20_detector.parameters(), max_norm=1.0)
+                optimizer_stage1.step()
+                scheduler_stage1.step()
 
-                train_loss += loss.item()
-                train_s1_loss += s1_loss.item()
-                train_s2_loss += s2_loss.item()
-                train_reg_loss += reg_loss.item()
+            if torch.isfinite(s2_loss):
+                # STAGE 2: Update Transformer only
+                optimizer_stage2.zero_grad()
+                s2_loss.backward(retain_graph=True)
+                torch.nn.utils.clip_grad_norm_(model.valid_vs_neg10_classifier.parameters(), max_norm=1.0)
+                optimizer_stage2.step()
+                scheduler_stage2.step()
 
+            if torch.isfinite(reg_loss):
+                # STAGE 3: Update Regressor only
+                optimizer_stage3.zero_grad()
+                reg_loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.angle_regressor.parameters(), max_norm=1.0)
+                optimizer_stage3.step()
+                scheduler_stage3.step()
+
+            train_loss += loss.item()
+            train_s1_loss += s1_loss.item()
+            train_s2_loss += s2_loss.item()
+            train_reg_loss += reg_loss.item()
+            step_count += 1
+
+        if step_count == 0:
+            print("Warning: No training steps performed this epoch.")
+            avg_train_loss = avg_s1 = avg_s2 = avg_reg = float('inf')
+        else:
+            avg_train_loss = train_loss / step_count
+            avg_s1 = train_s1_loss / step_count
+            avg_s2 = train_s2_loss / step_count
+            avg_reg = train_reg_loss / step_count
+
+        # VALIDATION
         model.eval()
         val_loss = 0.0
+        val_steps = 0
 
         with torch.no_grad():
-            for intensities, ground_truth in val_loader:
+            for batch in val_loader:
+                intensities, ground_truth = batch
                 intensities = intensities.to(device)
                 ground_truth = ground_truth.to(device)
-                masks = masks.to(device)
 
                 final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded = model(intensities, training=True)
-
-                final_preds = final_preds_padded[masks]
-                neg20_logits = neg20_logits_padded[masks]
-                valid_vs_neg10_logits = valid_vs_neg10_logits_padded[masks]
-                angle_preds = angle_preds_padded[masks]
-                targets_full = ground_truth[masks]
-
-                loss, _, _, _ = criterion( # Don't need individual val losses for printing
-                    final_preds, neg20_logits, valid_vs_neg10_logits, angle_preds, targets_full
+                loss, _, _, _ = criterion(
+                    final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded, ground_truth
                 )
 
                 if torch.isfinite(loss):
                     val_loss += loss.item()
+                    val_steps += 1
 
-        train_loss /= len(train_loader)
-        train_s1_loss /= len(train_loader)
-        train_s2_loss /= len(train_loader)
-        train_reg_loss /= len(train_loader)
-        val_loss /= len(val_loader)
+        if val_steps == 0:
+            avg_val_loss = float('inf')
+        else:
+            avg_val_loss = val_loss / val_steps
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if avg_val_loss < best_val_loss:
+            best_val_loss = avg_val_loss
             torch.save(model.state_dict(), 'best_full_three_stage_model.pth')
 
         if epoch % 10 == 0 or epoch < 5:
             print(f"Epoch {epoch+1:3d}/{num_epochs} | "
-                  f"Train: {train_loss:.4f} "
-                  f"(s1:{train_s1_loss:.3f}, "
-                  f"s2:{train_s2_loss:.3f}, "
-                  f"reg:{train_reg_loss:.4f}) | "
-                  f"Val: {val_loss:.4f} | Best: {best_val_loss:.4f}")
+                  f"Train: {avg_train_loss:.4f} "
+                  f"(s1:{avg_s1:.3f}, s2:{avg_s2:.3f}, reg:{avg_reg:.4f}) | "
+                  f"Val: {avg_val_loss:.4f} | Best: {best_val_loss:.4f}")
 
     model.load_state_dict(torch.load('best_full_three_stage_model.pth', map_location=device))
     print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}\n")
     return model
+
 
 # Post-process for 3-class metrics
 def map_to_3_classes(values):
@@ -798,7 +940,7 @@ def run_inference_for_csv(dataset, model, device):
 # ==============================================================================
 
 def main():
-    csv_file = '/Users/farhang/Downloads/fls_all_with_phi.csv'
+    csv_file = '/home/farhang/Downloads/fls_all_with_phi.csv'
 
     print("\n" + "="*60)
     print("FULL THREE-STAGE MODEL: NEURAL -20 + TRANSFORMER + REGRESSOR")
@@ -838,7 +980,12 @@ def main():
     model = FullThreeStageModel(prediction_type='phi', dropout_rate=0.1)
 
     model_path = 'best_full_three_stage_model.pth'
-    device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
 
     if os.path.exists(model_path):
         print(f"\nLoading existing model from {model_path}")
@@ -850,7 +997,7 @@ def main():
             model,
             loaders['train'],
             loaders['val'],
-            num_epochs=50
+            num_epochs=100
         )
 
     # Test

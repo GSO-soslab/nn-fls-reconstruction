@@ -6,6 +6,44 @@ import pandas as pd
 import os
 from plot_test import extract_pcl_points_from_row
 
+import torch
+import numpy as np
+from torch.utils.data import DataLoader
+from full_three_stage_model import FullThreeStageModel, BathymetryDataset
+
+def calculate_metrics_from_inference(model, test_loader, device):
+    """Calculate 3-class metrics directly from model inference"""
+    model.eval()
+    all_preds = []
+    all_ground_truth = []
+    
+    print("Running inference on test set...")
+    with torch.no_grad():
+        for batch_idx, (intensities, ground_truth) in enumerate(test_loader):
+            intensities = intensities.to(device)
+            ground_truth = ground_truth.to(device)
+            
+            final_preds, _, _, _ = model(intensities, training=False)
+            
+            all_preds.append(final_preds.cpu().numpy())
+            all_ground_truth.append(ground_truth.cpu().numpy())
+            
+            if (batch_idx + 1) % 10 == 0:
+                print(f"  Processed {batch_idx + 1} batches...")
+    
+    # Flatten and concatenate all batches
+    preds = np.concatenate([p.flatten() for p in all_preds])
+    gt = np.concatenate([g.flatten() for g in all_ground_truth])
+    
+    print(f"\nTotal predictions: {len(preds)}")
+    print(f"Total ground truth: {len(gt)}")
+    
+    # Convert to 3-class labels
+    gt_classes = classify_phi_values(gt)
+    pred_classes = classify_phi_values(preds)
+    
+    return gt, preds, gt_classes, pred_classes
+
 def classify_phi_values(phi_array):
     """
     Classify phi values into 3 categories:
@@ -241,36 +279,89 @@ def extract_all_phis_from_comparison(test_csv_path, original_csv_path):
     return np.array(all_orig_phis), np.array(all_test_phis)
 
 
-# Update your main function
+# # Update your main function
+# def main():
+#     # predictions_with_indices_path = "./data_splits/test_predictions_final.csv"
+#     predictions_with_indices_path = "./data_splits/test_predictions_full_three_stage.csv"
+#     original_csv_path = "/home/farhang/Downloads/fls_all_with_phi.csv"
+#     output_dir = "./confusion_matrix_results"
+
+#     os.makedirs(output_dir, exist_ok=True)
+
+#     # Extract all phis
+#     print("Extracting phi values from all rows...")
+#     original_phis, predicted_phis = extract_all_phis_from_comparison(
+#         predictions_with_indices_path,
+#         original_csv_path
+#     )
+
+#     print(f"\nExtracted {len(original_phis)} phi measurements")
+
+#     # Create 3-class confusion matrix and get metrics
+#     cm, cm_norm, metrics = plot_3class_confusion_matrix(
+#         original_phis,
+#         predicted_phis,
+#         output_dir=output_dir
+#     )
+
+#     # Plot detailed metrics breakdown
+#     plot_metrics_breakdown(metrics, output_dir=output_dir)
+
+#     print(f"\nResults saved to: {output_dir}/")
+
+
 def main():
-    # predictions_with_indices_path = "./data_splits/test_predictions_final.csv"
-    predictions_with_indices_path = "./data_splits/test_predictions_final.csv"
-    original_csv_path = "/Users/farhang/Downloads/fls_all_with_phi.csv"
+    device = torch.device('cuda' if torch.cuda.is_available() else
+                          'mps' if torch.backends.mps.is_available() else
+                          'cpu')
+    
     output_dir = "./confusion_matrix_results"
-
     os.makedirs(output_dir, exist_ok=True)
-
-    # Extract all phis
-    print("Extracting phi values from all rows...")
-    original_phis, predicted_phis = extract_all_phis_from_comparison(
-        predictions_with_indices_path,
-        original_csv_path
+    
+    # Load test data
+    print("Loading test dataset...")
+    test_csv = "./data_splits/test_data.csv"
+    test_dataset = BathymetryDataset(test_csv, prediction_type='phi')
+    test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False)
+    
+    print(f"Test set size: {len(test_dataset)}")
+    
+    # Load model
+    print("\nLoading model...")
+    model = FullThreeStageModel(prediction_type='phi', dropout_rate=0.1)
+    model_path = 'best_full_three_stage_model.pth'
+    
+    if os.path.exists(model_path):
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.to(device)
+        print(f"Loaded model from {model_path}")
+    else:
+        print(f"ERROR: Model not found at {model_path}")
+        return
+    
+    # Calculate metrics from inference
+    print("\n" + "="*60)
+    print("CALCULATING METRICS FROM DIRECT INFERENCE")
+    print("="*60)
+    
+    gt_values, pred_values, gt_classes, pred_classes = calculate_metrics_from_inference(
+        model, test_loader, device
     )
-
-    print(f"\nExtracted {len(original_phis)} phi measurements")
-
-    # Create 3-class confusion matrix and get metrics
+    
+    # Plot confusion matrix
+    print("\nGenerating confusion matrix...")
     cm, cm_norm, metrics = plot_3class_confusion_matrix(
-        original_phis,
-        predicted_phis,
+        gt_values,
+        pred_values,
         output_dir=output_dir
     )
-
-    # Plot detailed metrics breakdown
+    
+    # Plot metrics breakdown
+    print("Generating metrics breakdown...")
     plot_metrics_breakdown(metrics, output_dir=output_dir)
-
+    
     print(f"\nResults saved to: {output_dir}/")
-
+    print("="*60)
 
 if __name__ == "__main__":
     main()

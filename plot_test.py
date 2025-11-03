@@ -130,14 +130,14 @@ def extract_pcl_points_from_row(row_data, range_resolution, intensity_threshold,
         # print(intensities[:5])
         phis = numeric_values[3342:6014]     # columns 3342-6013\
         # phis = numeric_values[3342:6014].reshape(668, 4)
-        print(phis[437])
+        # print(phis[437])
         # print("Has Indices")
     else:
         intensities = numeric_values[1:669]  # columns 1-668
         # print(intensities[:5])
         phis = numeric_values[3341:6013]     # columns 3341-6012
         # phis = numeric_values[3341:6013].reshape(668, 4)
-        print(phis[437])
+        # print(phis[437])
         # print("No Indices")
 
     x_points = []
@@ -470,7 +470,8 @@ def main():
     # predictions_with_indices_path = "./data_splits/test_predictions_with_indices.csv"
     # predictions_with_indices_path = "./data_splits/train_predictions_with_indices.csv"
     # predictions_with_indices_path = "./data_splits/test_predictions_final.csv"
-    predictions_with_indices_path = "./data_splits/test_predictions_two_stage.csv"
+    # predictions_with_indices_path = "./data_splits/test_predictions_two_stage.csv"
+    predictions_with_indices_path = "./data_splits/test_predictions_full_three_stage.csv"
     # save_predictions_with_indices_to_csv(
     #     results['tangent'],
     #     results['phi'],
@@ -480,9 +481,9 @@ def main():
     # Generate comparison plots
     save_test_indices_vs_original_pcl_plots(
         test_csv_path=predictions_with_indices_path,
-        original_csv_path="/Users/farhang/Downloads/fls_all_with_phi.csv",
+        original_csv_path="/home/farhang/Downloads/fls_all_with_phi.csv",
         output_dir="./test_indices_vs_original",
-        specific_row_idx=31
+        specific_row_idx=63
     )
 
     # # process a specific row
