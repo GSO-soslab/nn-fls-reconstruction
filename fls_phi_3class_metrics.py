@@ -101,6 +101,46 @@ def calculate_3class_metrics(y_true, y_pred, class_names=['Valid', '(-10)', '(-2
 
     return metrics_dict
 
+def calculate_regression_metrics(y_true, y_pred):
+    """
+    Calculate MSE and MAE only for valid phi values (excluding -10 and -20)
+    """
+    y_true = np.array(y_true).flatten()
+    y_pred = np.array(y_pred).flatten()
+    
+    # Create mask for valid measurements (not -10 or -20)
+    valid_mask = (y_true != -10.0) & (y_true != -20.0) & (y_pred != -10.0) & (y_pred != -20.0)
+    
+    # Filter to only valid points
+    y_true_valid = y_true[valid_mask]
+    y_pred_valid = y_pred[valid_mask]
+    
+    if len(y_true_valid) == 0:
+        print("Warning: No valid data points found!")
+        return None
+    
+    # Calculate metrics
+    mse = np.mean((y_true_valid - y_pred_valid) ** 2)
+    mae = np.mean(np.abs(y_true_valid - y_pred_valid))
+    rmse = np.sqrt(mse)
+    
+    print(f"\n{'='*70}")
+    print(f"Regression Metrics (Valid Data Points Only)")
+    print(f"{'='*70}")
+    print(f"Total valid points: {len(y_true_valid)} out of {len(y_true)} ({len(y_true_valid)/len(y_true)*100:.1f}%)")
+    print(f"MSE:  {mse:.6f}")
+    print(f"RMSE: {rmse:.6f}")
+    print(f"MAE:  {mae:.6f}")
+    print(f"{'='*70}")
+    
+    return {
+        'mse': mse,
+        'rmse': rmse,
+        'mae': mae,
+        'n_valid': len(y_true_valid),
+        'n_total': len(y_true)
+    }
+
 def plot_3class_confusion_matrix(original_phis, predicted_phis, output_dir="./"):
     """
     Create confusion matrix for 3-class phi classification
@@ -263,7 +303,6 @@ def extract_all_phis_from_comparison(test_csv_path, original_csv_path):
             original_row_data = original_lines[original_row_idx]
             test_row_data = test_data_lines[i]
 
-            # Extract phis using your existing function
             # Since you're storing phi in both x and z temporarily
             orig_x, orig_z = extract_pcl_points_from_row(
                 original_row_data, 0.05988024, 0.1, 0.0, has_indices=False
@@ -272,14 +311,12 @@ def extract_all_phis_from_comparison(test_csv_path, original_csv_path):
                 test_row_data, 0.05988024, 0.1, 0.0, has_indices=True
             )
 
-            # Your code stores phi values in z (and temporarily in x too)
             all_orig_phis.extend(orig_z)
             all_test_phis.extend(test_z)
 
     return np.array(all_orig_phis), np.array(all_test_phis)
 
 
-# # Update your main function
 # def main():
 #     # predictions_with_indices_path = "./data_splits/test_predictions_final.csv"
 #     predictions_with_indices_path = "./data_splits/test_predictions_full_three_stage.csv"
@@ -308,7 +345,6 @@ def extract_all_phis_from_comparison(test_csv_path, original_csv_path):
 #     plot_metrics_breakdown(metrics, output_dir=output_dir)
 
 #     print(f"\nResults saved to: {output_dir}/")
-
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else
@@ -347,6 +383,24 @@ def main():
     gt_values, pred_values, gt_classes, pred_classes = calculate_metrics_from_inference(
         model, test_loader, device
     )
+    
+    # Calculate regression metrics (MSE, MAE, RMSE) for valid data only
+    print("\n" + "="*60)
+    print("REGRESSION METRICS")
+    print("="*60)
+    regression_metrics = calculate_regression_metrics(gt_values, pred_values)
+    
+    # Save regression metrics to file
+    if regression_metrics:
+        with open(f"{output_dir}/regression_metrics.txt", 'w') as f:
+            f.write(f"Regression Metrics (Valid Data Points Only)\n")
+            f.write(f"{'='*70}\n")
+            f.write(f"Total valid points: {regression_metrics['n_valid']} out of {regression_metrics['n_total']} ")
+            f.write(f"({regression_metrics['n_valid']/regression_metrics['n_total']*100:.1f}%)\n")
+            f.write(f"MSE:  {regression_metrics['mse']:.6f}\n")
+            f.write(f"RMSE: {regression_metrics['rmse']:.6f}\n")
+            f.write(f"MAE:  {regression_metrics['mae']:.6f}\n")
+        print(f"Regression metrics saved to {output_dir}/regression_metrics.txt")
     
     # Plot confusion matrix
     print("\nGenerating confusion matrix...")

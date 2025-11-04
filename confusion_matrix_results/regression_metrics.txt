@@ -1,0 +1,6 @@
+Regression Metrics (Valid Data Points Only)
+======================================================================
+Total valid points: 6906 out of 275216 (2.5%)
+MSE:  0.000386
+RMSE: 0.019652
+MAE:  0.010354
