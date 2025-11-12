@@ -8,8 +8,9 @@ from plot_test import extract_pcl_points_from_row
 
 import torch
 import numpy as np
-from torch.utils.data import DataLoader
-from full_three_stage_model import FullThreeStageModel, BathymetryDataset
+from torch.utils.data import DataLoader, ConcatDataset
+from full_three_stage_model import FullThreeStageModelCNN, BathymetryDataset
+
 
 def calculate_metrics_from_inference(model, test_loader, device):
     """Calculate 3-class metrics directly from model inference"""
@@ -17,7 +18,7 @@ def calculate_metrics_from_inference(model, test_loader, device):
     all_preds = []
     all_ground_truth = []
     
-    print("Running inference on test set...")
+    print("Running inference on dataset...")
     with torch.no_grad():
         for batch_idx, (intensities, ground_truth) in enumerate(test_loader):
             intensities = intensities.to(device)
@@ -44,6 +45,7 @@ def calculate_metrics_from_inference(model, test_loader, device):
     
     return gt, preds, gt_classes, pred_classes
 
+
 def classify_phi_values(phi_array):
     """
     Classify phi values into 3 categories:
@@ -52,12 +54,9 @@ def classify_phi_values(phi_array):
     2: Out of range/invalid (-20)
     """
     phi_array = np.array(phi_array)
-
     classes = np.zeros(len(phi_array), dtype=int)
     classes[phi_array == -10.0] = 1
     classes[phi_array == -20.0] = 2
-    # Everything else stays 0 (valid measurements)
-
     return classes
 
 
@@ -101,6 +100,7 @@ def calculate_3class_metrics(y_true, y_pred, class_names=['Valid', '(-10)', '(-2
 
     return metrics_dict
 
+
 def calculate_regression_metrics(y_true, y_pred):
     """
     Calculate MSE and MAE only for valid phi values (excluding -10 and -20)
@@ -141,7 +141,8 @@ def calculate_regression_metrics(y_true, y_pred):
         'n_total': len(y_true)
     }
 
-def plot_3class_confusion_matrix(original_phis, predicted_phis, output_dir="./"):
+
+def plot_3class_confusion_matrix(original_phis, predicted_phis, output_dir="./", title_suffix=""):
     """
     Create confusion matrix for 3-class phi classification
     """
@@ -162,13 +163,13 @@ def plot_3class_confusion_matrix(original_phis, predicted_phis, output_dir="./")
     # Count distribution
     print(f"\nGround Truth Distribution:")
     print(f"  Valid measurements: {np.sum(y_true == 0)} ({np.sum(y_true == 0)/len(y_true)*100:.1f}%)")
-    print(f"(-10):    {np.sum(y_true == 1)} ({np.sum(y_true == 1)/len(y_true)*100:.1f}%)")
-    print(f" (-20):      {np.sum(y_true == 2)} ({np.sum(y_true == 2)/len(y_true)*100:.1f}%)")
+    print(f"  (-10):    {np.sum(y_true == 1)} ({np.sum(y_true == 1)/len(y_true)*100:.1f}%)")
+    print(f"  (-20):      {np.sum(y_true == 2)} ({np.sum(y_true == 2)/len(y_true)*100:.1f}%)")
 
     print(f"\nPrediction Distribution:")
     print(f"  Valid measurements: {np.sum(y_pred == 0)} ({np.sum(y_pred == 0)/len(y_pred)*100:.1f}%)")
-    print(f" (-10):    {np.sum(y_pred == 1)} ({np.sum(y_pred == 1)/len(y_pred)*100:.1f}%)")
-    print(f" (-20):      {np.sum(y_pred == 2)} ({np.sum(y_pred == 2)/len(y_pred)*100:.1f}%)")
+    print(f"  (-10):    {np.sum(y_pred == 1)} ({np.sum(y_pred == 1)/len(y_pred)*100:.1f}%)")
+    print(f"  (-20):      {np.sum(y_pred == 2)} ({np.sum(y_pred == 2)/len(y_pred)*100:.1f}%)")
 
     # Create confusion matrix
     cm = confusion_matrix(y_true, y_pred)
@@ -185,7 +186,7 @@ def plot_3class_confusion_matrix(original_phis, predicted_phis, output_dir="./")
                 ax=ax1, cbar_kws={'label': 'Count'}, annot_kws={'size': 14})
     ax1.set_xlabel('Predicted Class', fontsize=12)
     ax1.set_ylabel('Ground Truth Class', fontsize=12)
-    ax1.set_title('Confusion Matrix (Counts)', fontsize=14)
+    ax1.set_title(f'Confusion Matrix - Counts {title_suffix}', fontsize=14)
 
     # Normalized (percentages)
     sns.heatmap(cm_normalized, annot=True, fmt='.2%', cmap='Blues',
@@ -193,11 +194,11 @@ def plot_3class_confusion_matrix(original_phis, predicted_phis, output_dir="./")
                 ax=ax2, cbar_kws={'label': 'Proportion'}, annot_kws={'size': 14})
     ax2.set_xlabel('Predicted Class', fontsize=12)
     ax2.set_ylabel('Ground Truth Class', fontsize=12)
-    ax2.set_title('Confusion Matrix (Normalized by Row)', fontsize=14)
+    ax2.set_title(f'Confusion Matrix - Normalized {title_suffix}', fontsize=14)
 
     plt.tight_layout()
-    plt.savefig(f"{output_dir}/confusion_matrix_3class.png", dpi=300, bbox_inches='tight')
-    # plt.show()
+    filename = f"{output_dir}/confusion_matrix_3class{title_suffix.lower().replace(' ', '_')}.png"
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
 
     # Print classification report
     print("\n" + "="*70)
@@ -213,7 +214,7 @@ def plot_3class_confusion_matrix(original_phis, predicted_phis, output_dir="./")
     return cm, cm_normalized, metrics
 
 
-def plot_metrics_breakdown(metrics, output_dir="./"):
+def plot_metrics_breakdown(metrics, output_dir="./", title_suffix=""):
     """
     Visualize TP/FP/FN/TN for each class
     """
@@ -240,7 +241,7 @@ def plot_metrics_breakdown(metrics, output_dir="./"):
 
     ax1.set_xlabel('Class', fontsize=12)
     ax1.set_ylabel('Count', fontsize=12)
-    ax1.set_title('TP/FP/FN per Class', fontsize=14)
+    ax1.set_title(f'TP/FP/FN per Class {title_suffix}', fontsize=14)
     ax1.set_xticks(x)
     ax1.set_xticklabels(class_names)
     ax1.legend()
@@ -260,7 +261,7 @@ def plot_metrics_breakdown(metrics, output_dir="./"):
 
     ax2.set_xlabel('Class', fontsize=12)
     ax2.set_ylabel('Score', fontsize=12)
-    ax2.set_title('Precision/Recall/F1 per Class', fontsize=14)
+    ax2.set_title(f'Precision/Recall/F1 per Class {title_suffix}', fontsize=14)
     ax2.set_xticks(x_pos)
     ax2.set_xticklabels(class_names)
     ax2.set_ylim([0, 1.1])
@@ -268,83 +269,61 @@ def plot_metrics_breakdown(metrics, output_dir="./"):
     ax2.grid(True, alpha=0.3, axis='y')
 
     plt.tight_layout()
-    plt.savefig(f"{output_dir}/metrics_breakdown_3class.png", dpi=300, bbox_inches='tight')
-    plt.show()
+    filename = f"{output_dir}/metrics_breakdown_3class{title_suffix.lower().replace(' ', '_')}.png"
+    plt.savefig(filename, dpi=300, bbox_inches='tight')
 
 
-def extract_all_phis_from_comparison(test_csv_path, original_csv_path):
-    """
-    Extract all phi values from both test and original data
-    """
-    with open(test_csv_path, 'r') as f:
-        test_lines = [line.rstrip('\n\r') for line in f.readlines()]
+def extract_and_print_classification_metrics(metrics, gt_classes, pred_classes):
+    """Extract recall values from metrics dict and print combined report"""
+    
+    class_keys = list(metrics.keys())
+    
+    # Extract recall values from the metrics dictionary
+    recall_valid = metrics[class_keys[0]]['Recall']
+    recall_minus10 = metrics[class_keys[1]]['Recall']
+    recall_minus20 = metrics[class_keys[2]]['Recall']
+    
+    # Extract precision values
+    precision_valid = metrics[class_keys[0]]['Precision']
+    precision_minus10 = metrics[class_keys[1]]['Precision']
+    precision_minus20 = metrics[class_keys[2]]['Precision']
+    
+    # Extract F1 scores
+    f1_valid = metrics[class_keys[0]]['F1']
+    f1_minus10 = metrics[class_keys[1]]['F1']
+    f1_minus20 = metrics[class_keys[2]]['F1']
+    
+    # Calculate overall accuracy
+    overall_accuracy = np.sum(gt_classes == pred_classes) / len(gt_classes)
+    
+    print(f"\n{'='*80}")
+    print(f"COMBINED MEASUREMENT QUALITY REPORT")
+    print(f"{'='*80}")
+    
+    print(f"\nReturn Classification Performance:")
+    print(f"{'='*80}")
+    print(f"{'Class':<20} {'Recall':>12} {'Precision':>12} {'F1-Score':>12}")
+    print(f"{'-'*80}")
+    print(f"{'Valid':<20} {recall_valid*100:>11.1f}% {precision_valid*100:>11.1f}% {f1_valid*100:>11.1f}%")
+    print(f"{'Partial (-10)':<20} {recall_minus10*100:>11.1f}% {precision_minus10*100:>11.1f}% {f1_minus10*100:>11.1f}%")
+    print(f"{'Out-of-range (-20)':<20} {recall_minus20*100:>11.1f}% {precision_minus20*100:>11.1f}% {f1_minus20*100:>11.1f}%")
+    print(f"{'-'*80}")
+    print(f"{'Overall Accuracy':<20} {overall_accuracy*100:>11.1f}%")
+    print(f"{'='*80}")
+    
+    return {
+        'recall_valid': recall_valid,
+        'recall_minus10': recall_minus10,
+        'recall_minus20': recall_minus20,
+        'precision_valid': precision_valid,
+        'precision_minus10': precision_minus10,
+        'precision_minus20': precision_minus20,
+        'f1_valid': f1_valid,
+        'f1_minus10': f1_minus10,
+        'f1_minus20': f1_minus20,
+        'overall_accuracy': overall_accuracy
+    }
 
-    with open(original_csv_path, 'r') as f:
-        original_lines = [line.rstrip('\n\r') for line in f.readlines()]
-
-    test_indices = []
-    test_data_lines = []
-
-    for line in test_lines:
-        if line.strip():
-            parts = line.split(',', 1)
-            if len(parts) >= 2:
-                try:
-                    test_indices.append(int(parts[0]))
-                    test_data_lines.append(parts[1])
-                except ValueError:
-                    continue
-
-    all_orig_phis = []
-    all_test_phis = []
-
-    for i, original_row_idx in enumerate(test_indices):
-        if original_row_idx < len(original_lines):
-            original_row_data = original_lines[original_row_idx]
-            test_row_data = test_data_lines[i]
-
-            # Since you're storing phi in both x and z temporarily
-            orig_x, orig_z = extract_pcl_points_from_row(
-                original_row_data, 0.05988024, 0.1, 0.0, has_indices=False
-            )
-            test_x, test_z = extract_pcl_points_from_row(
-                test_row_data, 0.05988024, 0.1, 0.0, has_indices=True
-            )
-
-            all_orig_phis.extend(orig_z)
-            all_test_phis.extend(test_z)
-
-    return np.array(all_orig_phis), np.array(all_test_phis)
-
-
-# def main():
-#     # predictions_with_indices_path = "./data_splits/test_predictions_final.csv"
-#     predictions_with_indices_path = "./data_splits/test_predictions_full_three_stage.csv"
-#     original_csv_path = "/home/farhang/Downloads/fls_all_with_phi.csv"
-#     output_dir = "./confusion_matrix_results"
-
-#     os.makedirs(output_dir, exist_ok=True)
-
-#     # Extract all phis
-#     print("Extracting phi values from all rows...")
-#     original_phis, predicted_phis = extract_all_phis_from_comparison(
-#         predictions_with_indices_path,
-#         original_csv_path
-#     )
-
-#     print(f"\nExtracted {len(original_phis)} phi measurements")
-
-#     # Create 3-class confusion matrix and get metrics
-#     cm, cm_norm, metrics = plot_3class_confusion_matrix(
-#         original_phis,
-#         predicted_phis,
-#         output_dir=output_dir
-#     )
-
-#     # Plot detailed metrics breakdown
-#     plot_metrics_breakdown(metrics, output_dir=output_dir)
-
-#     print(f"\nResults saved to: {output_dir}/")
 
 def main():
     device = torch.device('cuda' if torch.cuda.is_available() else
@@ -354,17 +333,29 @@ def main():
     output_dir = "./confusion_matrix_results"
     os.makedirs(output_dir, exist_ok=True)
     
-    # Load test data
-    print("Loading test dataset...")
+    # Load all splits
+    print("Loading datasets...")
+    train_csv = "./data_splits/train_data.csv"
+    val_csv = "./data_splits/val_data.csv"
     test_csv = "./data_splits/test_data.csv"
-    test_dataset = BathymetryDataset(test_csv, prediction_type='phi')
-    test_loader = DataLoader(test_dataset, batch_size=8, shuffle=False)
     
+    train_dataset = BathymetryDataset(train_csv, prediction_type='phi')
+    val_dataset = BathymetryDataset(val_csv, prediction_type='phi')
+    test_dataset = BathymetryDataset(test_csv, prediction_type='phi')
+    
+    print(f"Train set size: {len(train_dataset)}")
+    print(f"Val set size: {len(val_dataset)}")
     print(f"Test set size: {len(test_dataset)}")
+    
+    # Create combined dataset
+    combined_dataset = ConcatDataset([train_dataset, val_dataset, test_dataset])
+    combined_loader = DataLoader(combined_dataset, batch_size=8, shuffle=False)
+    
+    print(f"Combined set size: {len(combined_dataset)}")
     
     # Load model
     print("\nLoading model...")
-    model = FullThreeStageModel(prediction_type='phi', dropout_rate=0.1)
+    model = FullThreeStageModelCNN(prediction_type='phi', dropout_rate=0.1)
     model_path = 'best_full_three_stage_model.pth'
     
     if os.path.exists(model_path):
@@ -375,13 +366,13 @@ def main():
         print(f"ERROR: Model not found at {model_path}")
         return
     
-    # Calculate metrics from inference
+    # Calculate metrics from inference on combined dataset
     print("\n" + "="*60)
-    print("CALCULATING METRICS FROM DIRECT INFERENCE")
+    print("CALCULATING METRICS FROM DIRECT INFERENCE (COMBINED)")
     print("="*60)
     
     gt_values, pred_values, gt_classes, pred_classes = calculate_metrics_from_inference(
-        model, test_loader, device
+        model, combined_loader, device
     )
     
     # Calculate regression metrics (MSE, MAE, RMSE) for valid data only
@@ -392,30 +383,48 @@ def main():
     
     # Save regression metrics to file
     if regression_metrics:
-        with open(f"{output_dir}/regression_metrics.txt", 'w') as f:
-            f.write(f"Regression Metrics (Valid Data Points Only)\n")
+        with open(f"{output_dir}/regression_metrics_combined.txt", 'w') as f:
+            f.write(f"Regression Metrics (Combined: Train+Val+Test)\n")
+            f.write(f"Valid Data Points Only\n")
             f.write(f"{'='*70}\n")
             f.write(f"Total valid points: {regression_metrics['n_valid']} out of {regression_metrics['n_total']} ")
             f.write(f"({regression_metrics['n_valid']/regression_metrics['n_total']*100:.1f}%)\n")
             f.write(f"MSE:  {regression_metrics['mse']:.6f}\n")
             f.write(f"RMSE: {regression_metrics['rmse']:.6f}\n")
             f.write(f"MAE:  {regression_metrics['mae']:.6f}\n")
-        print(f"Regression metrics saved to {output_dir}/regression_metrics.txt")
+        print(f"Regression metrics saved to {output_dir}/regression_metrics_combined.txt")
     
     # Plot confusion matrix
     print("\nGenerating confusion matrix...")
     cm, cm_norm, metrics = plot_3class_confusion_matrix(
         gt_values,
         pred_values,
-        output_dir=output_dir
+        output_dir=output_dir,
+        title_suffix="(Combined: Train+Val+Test)"
     )
     
     # Plot metrics breakdown
     print("Generating metrics breakdown...")
-    plot_metrics_breakdown(metrics, output_dir=output_dir)
+    plot_metrics_breakdown(metrics, output_dir=output_dir, title_suffix="(Combined: Train+Val+Test)")
+    
+    # Extract and print classification metrics
+    class_metrics = extract_and_print_classification_metrics(metrics, gt_classes, pred_classes)
+    
+    # Save to file
+    with open(f"{output_dir}/classification_metrics_combined.txt", 'w') as f:
+        f.write(f"Return Classification Performance (Combined: Train+Val+Test)\n")
+        f.write(f"{'='*80}\n")
+        f.write(f"{'Class':<20} {'Recall':>12} {'Precision':>12} {'F1-Score':>12}\n")
+        f.write(f"{'-'*80}\n")
+        f.write(f"{'Valid':<20} {class_metrics['recall_valid']*100:>11.1f}% {class_metrics['precision_valid']*100:>11.1f}% {class_metrics['f1_valid']*100:>11.1f}%\n")
+        f.write(f"{'Partial (-10)':<20} {class_metrics['recall_minus10']*100:>11.1f}% {class_metrics['precision_minus10']*100:>11.1f}% {class_metrics['f1_minus10']*100:>11.1f}%\n")
+        f.write(f"{'Out-of-range (-20)':<20} {class_metrics['recall_minus20']*100:>11.1f}% {class_metrics['precision_minus20']*100:>11.1f}% {class_metrics['f1_minus20']*100:>11.1f}%\n")
+        f.write(f"{'-'*80}\n")
+        f.write(f"{'Overall Accuracy':<20} {class_metrics['overall_accuracy']*100:>11.1f}%\n")
     
     print(f"\nResults saved to: {output_dir}/")
     print("="*60)
+
 
 if __name__ == "__main__":
     main()
