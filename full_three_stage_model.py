@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, Subset
-from torch import Tensor 
+from torch import Tensor
 
 import pandas as pd
 import numpy as np
@@ -340,49 +340,49 @@ class RegressorCNN(nn.Module):
     def __init__(self, prediction_type='phi', dropout_rate=0.1):
         super().__init__()
         self.prediction_type = prediction_type
-        
+
         self.enc1 = nn.Sequential(
-            nn.Conv1d(2, 64, 7, padding=3),
+            nn.Conv1d(2, 64, 5, padding=2),
             nn.InstanceNorm1d(64),
             nn.LeakyReLU()
         )
         self.enc2 = nn.Sequential(
-            nn.Conv1d(64, 128, 5, stride=2, padding=2, dilation=1),
+            nn.Conv1d(64, 128, 5, stride=2, padding=2),
             nn.InstanceNorm1d(128),
             nn.LeakyReLU()
         )
         self.enc3 = nn.Sequential(
-            nn.Conv1d(128, 256, 5, stride=2, padding=2, dilation=1),
+            nn.Conv1d(128, 256, 5, stride=2, padding=2),
             nn.InstanceNorm1d(256),
             nn.LeakyReLU()
         )
-        
+
         # Dilated bottleneck for larger receptive field
         self.bottleneck = nn.Sequential(
-            nn.Conv1d(256, 256, 3, padding=2, dilation=2),
+            nn.Conv1d(256, 256, 7, padding=3),
             nn.InstanceNorm1d(256),
             nn.LeakyReLU(inplace=True),
             nn.Dropout(dropout_rate),
-            nn.Conv1d(256, 256, 3, padding=4, dilation=4),
+            nn.Conv1d(256, 256, 7, padding=3),
             nn.InstanceNorm1d(256),
             nn.LeakyReLU(inplace=True),
             nn.Dropout(dropout_rate),
-            nn.Conv1d(256, 256, 3, padding=2, dilation=2),
+            nn.Conv1d(256, 256, 7, padding=3),
             nn.InstanceNorm1d(256),
         )
-        
+
         # Bottleneck - increased residual blocks for better curvature learning
         self.residual_blocks = nn.ModuleList([
             nn.Sequential(
-                nn.Conv1d(256, 256, 3, padding=1),
+                nn.Conv1d(256, 256, 7, padding=3),
                 nn.InstanceNorm1d(256),
                 nn.LeakyReLU(inplace=True),
                 nn.Dropout(dropout_rate),
-                nn.Conv1d(256, 256, 3, padding=1),
+                nn.Conv1d(256, 256, 7, padding=3),
                 nn.InstanceNorm1d(256),
             ) for _ in range(8)
         ])
-        
+
         self.dec1 = nn.Sequential(
             nn.ConvTranspose1d(256, 128, 5, stride=2, padding=2, output_padding=1),
             nn.InstanceNorm1d(128),
@@ -394,10 +394,10 @@ class RegressorCNN(nn.Module):
             nn.LeakyReLU()
         )
         self.final_upsample = nn.Sequential(
-            nn.ConvTranspose1d(128, 32, 8, stride=4, padding=2, output_padding=0),
+            nn.ConvTranspose1d(128, 32, 5, stride=4, padding=1, output_padding=1),
             nn.LeakyReLU(),
         )
-        
+
         if prediction_type == 'combined':
             self.regressor = nn.Conv1d(32, 2, 3, padding=1)
         else:
@@ -417,7 +417,7 @@ class RegressorCNN(nn.Module):
         b = e3
         for block in self.residual_blocks:
             b = block(b) + b  # Add residual connection
-        
+
         # Apply dilated bottleneck
         b = self.bottleneck(b) + b
 
@@ -429,9 +429,9 @@ class RegressorCNN(nn.Module):
 
         features = self.final_upsample(d2)
         angle_pred = self.regressor(features)
-        
+
         return angle_pred.squeeze(1) if angle_pred.size(1) == 1 else angle_pred
-    
+
 # class Neg20Detector(nn.Module):
 #     """
 #     MLP to detect -20s based on intensity alone.
@@ -465,25 +465,33 @@ class RegressorCNN(nn.Module):
 #         return neg20_logits
 
 class Neg20DetectorCNN(nn.Module):
-    """CNN-based -20 detector with positional encoding"""
+    """CNN-based -20 detector with positional encoding and pooling"""
     def __init__(self, dropout_rate=0.1, pos_embed_dim=32):
         super().__init__()
-        self.pos_embed = nn.Embedding(2672, pos_embed_dim)
+        # self.pos_embed = nn.Embedding(2672, pos_embed_dim)
         self.intensity_proj = nn.Linear(1, pos_embed_dim)
-        
+
         self.net = nn.Sequential(
             nn.Conv1d(pos_embed_dim, 32, kernel_size=3, padding=1),
             nn.BatchNorm1d(32),
             nn.ReLU(),
+            nn.MaxPool1d(2, 2),  # 2672 -> 1336
             nn.Dropout(dropout_rate),
             nn.Conv1d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm1d(64),
             nn.ReLU(),
+            nn.MaxPool1d(2, 2),  # 1336 -> 668
             nn.Dropout(dropout_rate),
             nn.Conv1d(64, 32, kernel_size=3, padding=1),
             nn.BatchNorm1d(32),
             nn.ReLU(),
-            nn.Conv1d(32, 1, kernel_size=1)
+        )
+
+        # Upsample back to original resolution
+        self.upsample = nn.Sequential(
+            nn.ConvTranspose1d(32, 16, kernel_size=4, stride=2, padding=1),  # 668 -> 1336
+            nn.ReLU(),
+            nn.ConvTranspose1d(16, 1, kernel_size=4, stride=2, padding=1),   # 1336 -> 2672
         )
 
     def forward(self, intensities_expanded):
@@ -495,16 +503,20 @@ class Neg20DetectorCNN(nn.Module):
         """
         batch_size = intensities_expanded.size(0)
         device = intensities_expanded.device
-        
+
         # Project intensities and add positional embeddings
         x = intensities_expanded.unsqueeze(-1)  # [B, 2672, 1]
         x = self.intensity_proj(x).transpose(1, 2)  # [B, pos_embed_dim, 2672]
-        
+
         pos_idx = torch.arange(2672, device=device).long()
         pos_embed = self.pos_embed(pos_idx).transpose(0, 1).unsqueeze(0)  # [1, pos_embed_dim, 2672]
         x = x + pos_embed
-        
-        logits = self.net(x).squeeze(1)  # [B, 2672]
+
+        # Apply conv layers with pooling
+        x = self.net(x)  # [B, 32, 668]
+
+        # Upsample back to original resolution
+        logits = self.upsample(x).squeeze(1)  # [B, 2672]
         return logits
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
@@ -527,25 +539,33 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 class ValidVsNeg10CNN(nn.Module):
-    """CNN-based Valid vs -10 classifier with positional encoding"""
+    """CNN-based Valid vs -10 classifier with positional encoding and pooling"""
     def __init__(self, dropout_rate=0.1, pos_embed_dim=32):
         super().__init__()
         self.pos_embed = nn.Embedding(2672, pos_embed_dim)
         self.feature_proj = nn.Linear(2, pos_embed_dim)
-        
+
         self.net = nn.Sequential(
             nn.Conv1d(pos_embed_dim, 32, kernel_size=5, padding=2),
             nn.BatchNorm1d(32),
             nn.ReLU(),
+            nn.MaxPool1d(2, 2),  # 2672 -> 1336
             nn.Dropout(dropout_rate),
             nn.Conv1d(32, 64, kernel_size=7, padding=3),
             nn.BatchNorm1d(64),
             nn.ReLU(),
+            nn.MaxPool1d(2, 2),  # 1336 -> 668
             nn.Dropout(dropout_rate),
             nn.Conv1d(64, 32, kernel_size=5, padding=2),
             nn.BatchNorm1d(32),
             nn.ReLU(),
-            nn.Conv1d(32, 1, kernel_size=1)
+        )
+
+        # Upsample back to original resolution
+        self.upsample = nn.Sequential(
+            nn.ConvTranspose1d(32, 16, kernel_size=4, stride=2, padding=1),  # 668 -> 1336
+            nn.ReLU(),
+            nn.ConvTranspose1d(16, 1, kernel_size=4, stride=2, padding=1),   # 1336 -> 2672
         )
 
     def forward(self, features):
@@ -557,18 +577,22 @@ class ValidVsNeg10CNN(nn.Module):
         """
         batch_size = features.size(0)
         device = features.device
-        
+
         # Project features and add positional embeddings
         x = features.transpose(1, 2)  # [B, 2672, 2]
         x = self.feature_proj(x).transpose(1, 2)  # [B, pos_embed_dim, 2672]
-        
+
         pos_idx = torch.arange(2672, device=device).long()
         pos_embed = self.pos_embed(pos_idx).transpose(0, 1).unsqueeze(0)  # [1, pos_embed_dim, 2672]
         x = x + pos_embed
-        
-        logits = self.net(x).squeeze(1)  # [B, 2672]
+
+        # Apply conv layers with pooling
+        x = self.net(x)  # [B, 32, 668]
+
+        # Upsample back to original resolution
+        logits = self.upsample(x).squeeze(1)  # [B, 2672]
         return logits
-    
+
 class PureTransformerBinaryClassifier(nn.Module):
     def __init__(self, d_model=128, nhead=8, num_layers=3, dropout=0.2):
         super().__init__()
@@ -580,7 +604,7 @@ class PureTransformerBinaryClassifier(nn.Module):
             nn.Linear(d_model // 2, d_model)
         )
         self.pos_encoding = PositionalEncoding(d_model, dropout=dropout, max_len=5000)
-        
+
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -591,7 +615,7 @@ class PureTransformerBinaryClassifier(nn.Module):
             norm_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
+
         self.classifier = nn.Sequential(
             nn.Linear(d_model, d_model // 2),
             nn.LayerNorm(d_model // 2),
@@ -717,6 +741,79 @@ class PureTransformerBinaryClassifier(nn.Module):
 # LOSS FUNCTION
 # ==============================================================================
 
+class LaplacianSmoothnessLoss(nn.Module):
+    """
+    Regularize predictions to be locally smooth (bathymetry prior).
+    Based on: "Surface Normal Data Guided Depth Recovery with Graph Laplacian
+    Regularization" (ACM MMAsia 2019) and bathymetry reconstruction literature.
+
+    Enforces piecewise smoothness by penalizing high-frequency variations
+    (second-order derivatives) while preserving valid bathymetric features.
+
+    Combines:
+    1. Laplacian term (penalizes curvature discontinuities)
+    2. Total Variation term (penalizes abrupt gradient changes)
+    """
+    def __init__(self, lambda_smooth=0.1, lambda_tv=0.05):
+        super().__init__()
+        self.lambda_smooth = lambda_smooth
+        self.lambda_tv = lambda_tv
+
+    def forward(self, phi_pred):
+        """
+        Args:
+            phi_pred: [B, 2672] angle predictions
+        Returns:
+            smoothness_loss: scalar tensor
+        """
+        # Reshape to 2D grid: [B, 4 beams, 668 pixels]
+        phi_2d = phi_pred.view(-1, 4, 668)
+
+        # Only operate on valid regions (exclude -10 and -20 flags)
+        valid_mask = (phi_2d != -10.0) & (phi_2d != -20.0)
+
+        # === Total Variation (1st derivative) ===
+        # Penalizes abrupt changes in angle values
+        grad_pixel = phi_2d[:, :, 1:] - phi_2d[:, :, :-1]
+        grad_beam = phi_2d[:, 1:, :] - phi_2d[:, :-1, :]
+
+        valid_grad_pixel = valid_mask[:, :, :-1] & valid_mask[:, :, 1:]
+        valid_grad_beam = valid_mask[:, :-1, :] & valid_mask[:, 1:, :]
+
+        if valid_grad_pixel.any():
+            tv_pixel = (grad_pixel[valid_grad_pixel].abs()).mean()
+        else:
+            tv_pixel = torch.tensor(0.0, device=phi_pred.device, dtype=phi_pred.dtype)
+
+        if valid_grad_beam.any():
+            tv_beam = (grad_beam[valid_grad_beam].abs()).mean()
+        else:
+            tv_beam = torch.tensor(0.0, device=phi_pred.device, dtype=phi_pred.dtype)
+
+        tv_loss = self.lambda_tv * (tv_pixel + tv_beam)
+
+        # === Laplacian (2nd derivative) ===
+        # Penalizes curvature changes (encourages smooth curves)
+        laplacian_pixel = phi_2d[:, :, 2:] - 2*phi_2d[:, :, 1:-1] + phi_2d[:, :, :-2]
+        laplacian_beam = phi_2d[:, 2:, :] - 2*phi_2d[:, 1:-1, :] + phi_2d[:, :-2, :]
+
+        valid_lap_pixel = valid_mask[:, :, 1:-1]
+        valid_lap_beam = valid_mask[:, 1:-1, :]
+
+        if valid_lap_pixel.any():
+            lap_pixel = (laplacian_pixel[valid_lap_pixel] ** 2).mean()
+        else:
+            lap_pixel = torch.tensor(0.0, device=phi_pred.device, dtype=phi_pred.dtype)
+
+        if valid_lap_beam.any():
+            lap_beam = (laplacian_beam[valid_lap_beam] ** 2).mean()
+        else:
+            lap_beam = torch.tensor(0.0, device=phi_pred.device, dtype=phi_pred.dtype)
+
+        laplacian_loss = self.lambda_smooth * (lap_pixel + lap_beam)
+
+        return laplacian_loss + tv_loss
+
 # class FullThreeStageLoss(nn.Module):
 #     def __init__(self, alpha_neg20=2.0, alpha_valid_neg10=5.0, beta_reg=1.0):
 #         super().__init__()
@@ -773,11 +870,14 @@ class PureTransformerBinaryClassifier(nn.Module):
 
 
 class FullThreeStageLoss(nn.Module):
-    def __init__(self, alpha_neg20=2.0, alpha_valid_neg10=5.0, beta_reg=1.0):
+    def __init__(self, alpha_neg20=2.0, alpha_valid_neg10=5.0, beta_reg=1.0, lambda_smooth=0.1):
         super().__init__()
         self.alpha_neg20 = alpha_neg20
         self.alpha_valid_neg10 = alpha_valid_neg10
         self.beta_reg = beta_reg
+
+        # Add Laplacian smoothness regularization
+        self.smoothness_loss = LaplacianSmoothnessLoss(lambda_smooth=lambda_smooth)
 
     def forward(self, final_preds, neg20_logits, valid_vs_neg10_logits, angle_preds, targets_full):
 
@@ -797,7 +897,7 @@ class FullThreeStageLoss(nn.Module):
 
         # Stage 2: Binary Classification for Valid vs -10 (only on non--20 data)
         non_neg20_mask = (targets_full != -20)
-        
+
         if non_neg20_mask.any():
             target_is_valid = (targets_full != -10).float()
             num_valid = target_is_valid[non_neg20_mask].sum()
@@ -814,18 +914,23 @@ class FullThreeStageLoss(nn.Module):
 
         # Stage 3: Regression Loss (only on Valid positions)
         valid_mask = (targets_full != -10) & (targets_full != -20)
-        
+
         if valid_mask.any():
             reg_loss = F.mse_loss(angle_preds[valid_mask], targets_full[valid_mask])
         else:
             reg_loss = torch.tensor(0.0, device=targets_full.device, dtype=targets_full.dtype)
 
+        # Stage 4: Laplacian Smoothness Regularization (NEW)
+        # Apply to angle predictions to enforce geometric smoothness
+        smooth_loss = self.smoothness_loss(angle_preds)
+
         total_loss = (self.alpha_neg20 * s1_loss +
                       self.alpha_valid_neg10 * s2_loss +
-                      self.beta_reg * reg_loss)
+                      self.beta_reg * reg_loss +
+                      smooth_loss)
 
-        return total_loss, s1_loss, s2_loss, reg_loss
-    
+        return total_loss, s1_loss, s2_loss, reg_loss, smooth_loss
+
 class FullThreeStageModelCNN(nn.Module):
     """
     All-CNN architecture with positional embeddings.
@@ -883,24 +988,27 @@ class FullThreeStageModelCNN(nn.Module):
 
         # Final blending
         if training:
+            # Weight the valid_vs_neg10 decision by (1 - neg20_probs) to suppress
+            # its influence when the pixel is likely to be -20
+            effective_valid_prob = (1 - neg20_probs) * valid_vs_neg10_probs
+            effective_neg10_prob = (1 - neg20_probs) * (1 - valid_vs_neg10_probs)
+
             final_predictions = (
                 neg20_probs * (-20.0) +
-                (1 - neg20_probs) * (
-                    valid_vs_neg10_probs * angle_preds +
-                    (1 - valid_vs_neg10_probs) * (-10.0)
-                )
+                effective_valid_prob * angle_preds +
+                effective_neg10_prob * (-10.0)
             )
         else:
             final_predictions = angle_preds.clone()
-            is_neg20 = (neg20_probs > 0.8799999)
-            is_valid = (valid_vs_neg10_probs > 0.879999)
+            is_neg20 = (neg20_probs > 0.95)
+            is_valid = (valid_vs_neg10_probs > 0.85)
             final_predictions[is_neg20] = -20.0
             non_neg20_mask = ~is_neg20
             final_predictions[non_neg20_mask & ~is_valid] = -10.0
             final_predictions[non_neg20_mask & is_valid] = angle_preds[non_neg20_mask & is_valid]
 
         return final_predictions, neg20_logits, valid_vs_neg10_logits, angle_preds
-    
+
 # ==============================================================================
 # TRAINING FUNCTIONS
 # ==============================================================================
@@ -1177,10 +1285,10 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
     scheduler_stage2 = torch.optim.lr_scheduler.OneCycleLR(optimizer_stage2, max_lr=1e-4, total_steps=total_steps, pct_start=0.3)
     scheduler_stage3 = torch.optim.lr_scheduler.OneCycleLR(optimizer_stage3, max_lr=1e-5, total_steps=total_steps, pct_start=0.3)
 
-    criterion = FullThreeStageLoss(alpha_neg20=2.0, alpha_valid_neg10=5.0, beta_reg=1.0)
+    criterion = FullThreeStageLoss(alpha_neg20=2.0, alpha_valid_neg10=5.0, beta_reg=2.0, lambda_smooth=0.005)
 
     print(f"\n{'='*60}")
-    print("TRAINING FULL THREE-STAGE MODEL (SEPARATE LOSSES)")
+    print("TRAINING FULL THREE-STAGE MODEL (WITH LAPLACIAN SMOOTHNESS)")
     print(f"{'='*60}")
     print(f"Device: {device}")
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -1193,6 +1301,7 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
         train_s1_loss = 0.0
         train_s2_loss = 0.0
         train_reg_loss = 0.0
+        train_smooth_loss = 0.0
         step_count = 0
 
         for batch_idx, batch in enumerate(train_loader):
@@ -1203,8 +1312,8 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
             # FORWARD PASS
             final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded = model(intensities, training=True)
 
-            # COMPUTE ALL LOSSES
-            loss, s1_loss, s2_loss, reg_loss = criterion(
+            # COMPUTE ALL LOSSES (including smoothness)
+            loss, s1_loss, s2_loss, reg_loss, smooth_loss = criterion(
                 final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded, ground_truth
             )
 
@@ -1224,10 +1333,11 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
                 optimizer_stage2.step()
                 scheduler_stage2.step()
 
-            # STAGE 3: Update Regressor only
-            if torch.isfinite(reg_loss):
+            # STAGE 3: Update Regressor only (includes smoothness regularization)
+            regressor_loss = reg_loss + smooth_loss
+            if torch.isfinite(regressor_loss):
                 optimizer_stage3.zero_grad()
-                reg_loss.backward()
+                regressor_loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.angle_regressor.parameters(), max_norm=1.0)
                 optimizer_stage3.step()
                 scheduler_stage3.step()
@@ -1236,16 +1346,18 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
             train_s1_loss += s1_loss.item()
             train_s2_loss += s2_loss.item()
             train_reg_loss += reg_loss.item()
+            train_smooth_loss += smooth_loss.item()
             step_count += 1
 
         if step_count == 0:
             print("Warning: No training steps performed this epoch.")
-            avg_train_loss = avg_s1 = avg_s2 = avg_reg = float('inf')
+            avg_train_loss = avg_s1 = avg_s2 = avg_reg = avg_smooth = float('inf')
         else:
             avg_train_loss = train_loss / step_count
             avg_s1 = train_s1_loss / step_count
             avg_s2 = train_s2_loss / step_count
             avg_reg = train_reg_loss / step_count
+            avg_smooth = train_smooth_loss / step_count
 
         # VALIDATION
         model.eval()
@@ -1259,7 +1371,7 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
                 ground_truth = ground_truth.to(device)
 
                 final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded = model(intensities, training=False)
-                loss, _, _, _ = criterion(
+                loss, _, _, _, _ = criterion(
                     final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded, ground_truth
                 )
 
@@ -1279,7 +1391,7 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
         if epoch % 10 == 0 or epoch < 5:
             print(f"Epoch {epoch+1:3d}/{num_epochs} | "
                   f"Train: {avg_train_loss:.4f} "
-                  f"(s1:{avg_s1:.3f}, s2:{avg_s2:.3f}, reg:{avg_reg:.4f}) | "
+                  f"(s1:{avg_s1:.3f}, s2:{avg_s2:.3f}, reg:{avg_reg:.4f}, smooth:{avg_smooth:.4f}) | "
                   f"Val: {avg_val_loss:.4f} | Best: {best_val_loss:.4f}")
 
     model.load_state_dict(torch.load('best_full_three_stage_model.pth', map_location=device))
@@ -1312,7 +1424,7 @@ def run_inference_for_csv(dataset, model, device):
 # ==============================================================================
 
 def main():
-    csv_file = '/home/farhang/Downloads/fls_all_with_phi.csv'
+    csv_file = '/Users/farhang/Downloads/fls_all_with_phi.csv'
 
     print("\n" + "="*60)
     print("FULL THREE-STAGE MODEL: NEURAL -20 + TRANSFORMER + REGRESSOR")
@@ -1369,7 +1481,7 @@ def main():
             model,
             loaders['train'],
             loaders['val'],
-            num_epochs=100
+            num_epochs=60
         )
 
     # Test

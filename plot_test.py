@@ -166,17 +166,24 @@ def extract_pcl_points_from_row(row_data, range_resolution, intensity_threshold,
             # else:
             #     phi_rad = -20.0
 
-            # Calculate 3D coordinates for ALL points (no filtering)
-            x = range_val * np.cos(azimuth) * np.cos(phi_rad)
-            y = range_val * np.sin(azimuth) * np.cos(phi_rad)
-            z = range_val * np.sin(phi_rad)
+            # Calculate 3D coordinates, skipping invalid phi values (-10, -20)
+            if abs(phi_rad + 10.0) > 0.01 and abs(phi_rad + 20.0) > 0.01:
+                x = range_val * np.cos(azimuth) * np.cos(phi_rad)
+                y = range_val * np.sin(azimuth) * np.cos(phi_rad)
+                z = range_val * np.sin(phi_rad)
+
+                x_points.append(x)
+                z_points.append(z)
+            else:
+                # For invalid phi values, append NaN to maintain index alignment
+                x_points.append(float('nan'))
+                z_points.append(float('nan'))
+
 
             ## Temp
             # x = phi_rad
             # z= phi_rad
 
-            x_points.append(x)
-            z_points.append(z)
 
     # print(f"Total points generated: {len(x_points)} (expected: {668*4})")
     return x_points, z_points
@@ -351,8 +358,8 @@ def save_test_indices_vs_original_pcl_plots(test_csv_path, original_csv_path, ou
 
             # Create figure with 3 subplots (1 row, 3 columns)
             if len(orig_x) > 0 or len(test_x) > 0:
-                fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
-                # fig, (ax3) = plt.subplots(1, 1, figsize=(20, 6))
+                # fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
+                fig, (ax1) = plt.subplots(1, 1, figsize=(12, 12))
 
                 # Subplot 1: Scatter plot (X vs Z)
                 # if len(orig_x) > 0:
@@ -362,20 +369,24 @@ def save_test_indices_vs_original_pcl_plots(test_csv_path, original_csv_path, ou
 
             if len(orig_x) > 0:
                 # Filter out -10 and -20 values from both x and z
-                orig_mask = (np.array(orig_x) != -10) & (np.array(orig_x) != -20) & \
-                            (np.array(orig_z) != -10) & (np.array(orig_z) != -20)
+                orig_x_arr = np.array(orig_x, dtype=float)
+                orig_z_arr = np.array(orig_z, dtype=float)
+                orig_mask = (np.abs(orig_x_arr + 10.0) > 0.01) & (np.abs(orig_x_arr + 20.0) > 0.01) & \
+                            (np.abs(orig_z_arr + 10.0) > 0.01) & (np.abs(orig_z_arr + 20.0) > 0.01)
                 if np.any(orig_mask):
-                    filtered_orig_x = np.array(orig_x)[orig_mask]
-                    filtered_orig_z = np.array(orig_z)[orig_mask]
+                    filtered_orig_x = orig_x_arr[orig_mask]
+                    filtered_orig_z = orig_z_arr[orig_mask]
                     ax1.scatter(filtered_orig_x, filtered_orig_z, c='blue', s=3, alpha=0.8, label=f'Original Row {original_row_idx}')
 
             if len(test_x) > 0:
                 # Filter out -10 and -20 values from both x and z
-                test_mask = (np.array(test_x) != -10.0) & (np.array(test_x) != -20) & \
-                            (np.array(test_z) != -10.0) & (np.array(test_z) != -20)
+                test_x_arr = np.array(test_x, dtype=float)
+                test_z_arr = np.array(test_z, dtype=float)
+                test_mask = (np.abs(test_x_arr + 10.0) > 0.01) & (np.abs(test_x_arr + 20.0) > 0.01) & \
+                            (np.abs(test_z_arr + 10.0) > 0.01) & (np.abs(test_z_arr + 20.0) > 0.01)
                 if np.any(test_mask):
-                    filtered_test_x = np.array(test_x)[test_mask]
-                    filtered_test_z = np.array(test_z)[test_mask]
+                    filtered_test_x = test_x_arr[test_mask]
+                    filtered_test_z = test_z_arr[test_mask]
                     ax1.scatter(filtered_test_x, filtered_test_z, c='red', s=2, alpha=0.6, label=f'Test Split Row {original_row_idx}')
 
                 ax1.set_xlabel('X (meters)')
@@ -387,19 +398,19 @@ def save_test_indices_vs_original_pcl_plots(test_csv_path, original_csv_path, ou
                 ax1.axhline(y=0, color='gray', linestyle='--', alpha=0.3)
                 ax1.axvline(x=0, color='gray', linestyle='--', alpha=0.3)
 
-                # Subplot 2: X points vs point index (0 to 668*4)
-                point_indices = np.arange(len(orig_x)) if len(orig_x) > 0 else np.arange(len(test_x))
+                # # Subplot 2: X points vs point index (0 to 668*4)
+                # point_indices = np.arange(len(orig_x)) if len(orig_x) > 0 else np.arange(len(test_x))
 
-                if len(orig_x) > 0:
-                    ax2.plot(point_indices[:len(orig_x)], orig_x, 'b-', linewidth=1, alpha=0.8, label='Original X')
-                if len(test_x) > 0:
-                    ax2.plot(point_indices[:len(test_x)], test_x, 'r-', linewidth=1, alpha=0.8, label='Test X')
+                # if len(orig_x) > 0:
+                #     ax2.plot(point_indices[:len(orig_x)], orig_x, 'b-', linewidth=1, alpha=0.8, label='Original X')
+                # if len(test_x) > 0:
+                #     ax2.plot(point_indices[:len(test_x)], test_x, 'r-', linewidth=1, alpha=0.8, label='Test X')
 
-                ax2.set_xlabel('Point Index (0 to 668×4)')
-                ax2.set_ylabel('X (meters)')
-                ax2.set_title(f'X Coordinates - Row Index {original_row_idx}')
-                ax2.legend()
-                ax2.grid(True, alpha=0.3)
+                # ax2.set_xlabel('Point Index (0 to 668×4)')
+                # ax2.set_ylabel('X (meters)')
+                # ax2.set_title(f'X Coordinates - Row Index {original_row_idx}')
+                # ax2.legend()
+                # ax2.grid(True, alpha=0.3)
 
                 # Subplot 3: Z points vs point index (0 to 668*4)
                 # uncomment to remove filtering -10 and -20
@@ -416,42 +427,42 @@ def save_test_indices_vs_original_pcl_plots(test_csv_path, original_csv_path, ou
                 #         filtered_orig_indices = np.arange(len(orig_z))[orig_mask]
                 #         ax3.scatter(filtered_orig_indices, filtered_orig_z, c='blue', s=2, alpha=0.8, label='Original Phi')
 
-                if len(orig_z) > 0:
-                    orig_z = np.array(orig_z).reshape(668, 4)
-                    for point_idx in range(668):
-                        for beam_idx in range(4):
-                            phi_val = orig_z[point_idx, beam_idx]
+                # if len(orig_z) > 0:
+                #     orig_z = np.array(orig_z).reshape(668, 4)
+                #     for point_idx in range(668):
+                #         for beam_idx in range(4):
+                #             phi_val = orig_z[point_idx, beam_idx]
 
-                            # Filter out -10 and -20 values
-                            # if phi_val not in [-10, -20]:
-                            ax3.scatter(point_idx, phi_val, c='blue', s=30, alpha=0.8,marker='x',
-                                            label='Original Phi' if (point_idx == 0 and beam_idx == 0) else "")
+                #             # Filter out -10 and -20 values
+                #             # if phi_val not in [-10, -20]:
+                #             ax3.scatter(point_idx, phi_val, c='blue', s=30, alpha=0.8,marker='x',
+                #                             label='Original Phi' if (point_idx == 0 and beam_idx == 0) else "")
+
+                # # if len(test_z) > 0:
+                # #     # Filter out -10 and -20 values
+                # #     test_mask = (np.array(test_z) != -10) & (np.array(test_z) != -20)
+                # #     if np.any(test_mask):
+                # #         filtered_test_z = np.array(test_z)[test_mask]
+                # #         filtered_test_indices = np.arange(len(test_z))[test_mask]
+                # #         ax3.scatter(filtered_test_indices, filtered_test_z, c='red', s=2, alpha=0.8, label='Test Phi')
 
                 # if len(test_z) > 0:
-                #     # Filter out -10 and -20 values
-                #     test_mask = (np.array(test_z) != -10) & (np.array(test_z) != -20)
-                #     if np.any(test_mask):
-                #         filtered_test_z = np.array(test_z)[test_mask]
-                #         filtered_test_indices = np.arange(len(test_z))[test_mask]
-                #         ax3.scatter(filtered_test_indices, filtered_test_z, c='red', s=2, alpha=0.8, label='Test Phi')
+                #     test_z = np.array(test_z).reshape(668, 4)  # reshape flat array to (668,4)
+                #     for point_idx in range(668):
+                #         for beam_idx in range(4):
+                #             phi_val = test_z[point_idx, beam_idx]
 
-                if len(test_z) > 0:
-                    test_z = np.array(test_z).reshape(668, 4)  # reshape flat array to (668,4)
-                    for point_idx in range(668):
-                        for beam_idx in range(4):
-                            phi_val = test_z[point_idx, beam_idx]
+                #             # Filter out -10 and -20 values
+                #             # if phi_val not in [-10, -20]:
+                #             ax3.scatter(point_idx, phi_val, s=5, alpha=0.8,marker='o', facecolors='none', edgecolors='red',
+                #                             label='Test Phi' if (point_idx == 0 and beam_idx == 0) else "")
 
-                            # Filter out -10 and -20 values
-                            # if phi_val not in [-10, -20]:
-                            ax3.scatter(point_idx, phi_val, s=5, alpha=0.8,marker='o', facecolors='none', edgecolors='red',
-                                            label='Test Phi' if (point_idx == 0 and beam_idx == 0) else "")
-
-                ax3.set_xlabel('Point Index')
-                ax3.set_ylabel('Z (meters)')
-                # ax3.set_ylabel('Phi (Rads)')
-                ax3.set_title(f'Z Coordinates - Row Index {original_row_idx}')
-                ax3.legend(loc = 'upper right')
-                ax3.grid(True, alpha=0.3)
+                # ax3.set_xlabel('Point Index')
+                # ax3.set_ylabel('Z (meters)')
+                # # ax3.set_ylabel('Phi (Rads)')
+                # ax3.set_title(f'Z Coordinates - Row Index {original_row_idx}')
+                # ax3.legend(loc = 'upper right')
+                # ax3.grid(True, alpha=0.3)
 
                 plt.tight_layout()
                 plt.savefig(f"{output_dir}/row_index_{int(original_row_idx):04d}.png", dpi=300, bbox_inches='tight')
@@ -481,9 +492,10 @@ def main():
     # Generate comparison plots
     save_test_indices_vs_original_pcl_plots(
         test_csv_path=predictions_with_indices_path,
-        original_csv_path="/home/farhang/Downloads/fls_all_with_phi.csv",
+        original_csv_path="/Users/farhang/Downloads/fls_all_with_phi.csv",
         output_dir="./test_indices_vs_original",
-        specific_row_idx=265
+        specific_row_idx=2
+
     )
 
     # # process a specific row
