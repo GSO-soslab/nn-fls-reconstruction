@@ -38,6 +38,7 @@ dist/
 *.pid
 log/
 test_indices_vs_original/
+train_indices_vs_original/
 data_splits/
 test_*
 class_pred*

@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import os
 import pandas as pd
 import numpy as np
+from scipy.spatial.distance import cdist
 
 # only specified non nan values to extract
 # def extract_pcl_points_from_row(row_data, range_resolution, intensity_threshold, azimuth, has_indices=False):
@@ -188,6 +189,176 @@ def extract_pcl_points_from_row(row_data, range_resolution, intensity_threshold,
     # print(f"Total points generated: {len(x_points)} (expected: {668*4})")
     return x_points, z_points
 
+def compute_chamfer_distance(pred_x, pred_z, gt_x, gt_z):
+    """
+    Compute Chamfer distance using point-to-point correspondence (not nearest neighbor).
+    Both arrays should have same length (2672 values).
+    Only compute distances where both pred and GT are valid (not -10 or -20).
+
+    Args:
+        pred_x, pred_z: Arrays of predicted x, z coordinates (length 2672)
+        gt_x, gt_z: Arrays of ground truth x, z coordinates (length 2672)
+
+    Returns:
+        chamfer_dist: Mean Euclidean distance at corresponding indices
+    """
+    pred_x = np.array(pred_x, dtype=float)
+    pred_z = np.array(pred_z, dtype=float)
+    gt_x = np.array(gt_x, dtype=float)
+    gt_z = np.array(gt_z, dtype=float)
+
+    # Find valid points where BOTH pred and GT are valid (not -10 or -20)
+    pred_valid = (np.abs(pred_x + 10.0) > 0.01) & (np.abs(pred_x + 20.0) > 0.01) & \
+                 (np.abs(pred_z + 10.0) > 0.01) & (np.abs(pred_z + 20.0) > 0.01)
+
+    gt_valid = (np.abs(gt_x + 10.0) > 0.01) & (np.abs(gt_x + 20.0) > 0.01) & \
+               (np.abs(gt_z + 10.0) > 0.01) & (np.abs(gt_z + 20.0) > 0.01)
+
+    # Only compute distance where both are valid
+    both_valid = pred_valid & gt_valid
+
+    if not np.any(both_valid):
+        return float('nan')
+
+    # Compute Euclidean distances at corresponding indices (point-to-point)
+    distances = np.sqrt((pred_x[both_valid] - gt_x[both_valid])**2 +
+                       (pred_z[both_valid] - gt_z[both_valid])**2)
+
+    # Chamfer: mean of point-to-point distances
+    chamfer_dist = np.mean(distances)
+
+    return chamfer_dist
+
+def compute_hausdorff_distance(pred_x, pred_z, gt_x, gt_z):
+    """
+    Compute Hausdorff distance using point-to-point correspondence (not nearest neighbor).
+    Both arrays should have same length (2672 values).
+    Only compute distances where both pred and GT are valid (not -10 or -20).
+
+    Args:
+        pred_x, pred_z: Arrays of predicted x, z coordinates (length 2672)
+        gt_x, gt_z: Arrays of ground truth x, z coordinates (length 2672)
+
+    Returns:
+        hausdorff_dist: Maximum Euclidean distance at corresponding indices
+    """
+    pred_x = np.array(pred_x, dtype=float)
+    pred_z = np.array(pred_z, dtype=float)
+    gt_x = np.array(gt_x, dtype=float)
+    gt_z = np.array(gt_z, dtype=float)
+
+    # Find valid points where BOTH pred and GT are valid (not -10 or -20)
+    pred_valid = (np.abs(pred_x + 10.0) > 0.01) & (np.abs(pred_x + 20.0) > 0.01) & \
+                 (np.abs(pred_z + 10.0) > 0.01) & (np.abs(pred_z + 20.0) > 0.01)
+
+    gt_valid = (np.abs(gt_x + 10.0) > 0.01) & (np.abs(gt_x + 20.0) > 0.01) & \
+               (np.abs(gt_z + 10.0) > 0.01) & (np.abs(gt_z + 20.0) > 0.01)
+
+    # Only compute distance where both are valid
+    both_valid = pred_valid & gt_valid
+
+    if not np.any(both_valid):
+        return float('nan')
+
+    # Compute Euclidean distances at corresponding indices (point-to-point)
+    distances = np.sqrt((pred_x[both_valid] - gt_x[both_valid])**2 +
+                       (pred_z[both_valid] - gt_z[both_valid])**2)
+
+    # Hausdorff: maximum of point-to-point distances
+    hausdorff_dist = np.max(distances)
+
+    return hausdorff_dist
+
+def compute_nn_chamfer_distance(pred_x, pred_z, gt_x, gt_z):
+    """
+    Compute Chamfer distance using nearest neighbor search (standard definition).
+
+    Args:
+        pred_x, pred_z: Arrays of predicted x, z coordinates
+        gt_x, gt_z: Arrays of ground truth x, z coordinates
+
+    Returns:
+        nn_chamfer_dist: Mean of bidirectional nearest neighbor distances
+    """
+    pred_x = np.array(pred_x, dtype=float)
+    pred_z = np.array(pred_z, dtype=float)
+    gt_x = np.array(gt_x, dtype=float)
+    gt_z = np.array(gt_z, dtype=float)
+
+    # Filter valid points
+    pred_valid = (np.abs(pred_x + 10.0) > 0.01) & (np.abs(pred_x + 20.0) > 0.01) & \
+                 (np.abs(pred_z + 10.0) > 0.01) & (np.abs(pred_z + 20.0) > 0.01)
+
+    gt_valid = (np.abs(gt_x + 10.0) > 0.01) & (np.abs(gt_x + 20.0) > 0.01) & \
+               (np.abs(gt_z + 10.0) > 0.01) & (np.abs(gt_z + 20.0) > 0.01)
+
+    pred_points = np.column_stack([pred_x[pred_valid], pred_z[pred_valid]])
+    gt_points = np.column_stack([gt_x[gt_valid], gt_z[gt_valid]])
+
+    if len(pred_points) == 0 or len(gt_points) == 0:
+        return float('nan')
+
+    # Compute pairwise distances
+    dist_matrix = cdist(pred_points, gt_points, metric='euclidean')
+
+    # Forward: pred -> GT (for each pred point, find nearest GT point)
+    min_dist_pred_to_gt = np.min(dist_matrix, axis=1)
+    forward_chamfer = np.mean(min_dist_pred_to_gt)
+
+    # Backward: GT -> pred (for each GT point, find nearest pred point)
+    min_dist_gt_to_pred = np.min(dist_matrix, axis=0)
+    backward_chamfer = np.mean(min_dist_gt_to_pred)
+
+    # Chamfer distance is the average of both directions
+    nn_chamfer_dist = (forward_chamfer + backward_chamfer) / 2.0
+
+    return nn_chamfer_dist
+
+def compute_nn_hausdorff_distance(pred_x, pred_z, gt_x, gt_z):
+    """
+    Compute Hausdorff distance using nearest neighbor search (standard definition).
+
+    Args:
+        pred_x, pred_z: Arrays of predicted x, z coordinates
+        gt_x, gt_z: Arrays of ground truth x, z coordinates
+
+    Returns:
+        nn_hausdorff_dist: Maximum of bidirectional nearest neighbor distances
+    """
+    pred_x = np.array(pred_x, dtype=float)
+    pred_z = np.array(pred_z, dtype=float)
+    gt_x = np.array(gt_x, dtype=float)
+    gt_z = np.array(gt_z, dtype=float)
+
+    # Filter valid points
+    pred_valid = (np.abs(pred_x + 10.0) > 0.01) & (np.abs(pred_x + 20.0) > 0.01) & \
+                 (np.abs(pred_z + 10.0) > 0.01) & (np.abs(pred_z + 20.0) > 0.01)
+
+    gt_valid = (np.abs(gt_x + 10.0) > 0.01) & (np.abs(gt_x + 20.0) > 0.01) & \
+               (np.abs(gt_z + 10.0) > 0.01) & (np.abs(gt_z + 20.0) > 0.01)
+
+    pred_points = np.column_stack([pred_x[pred_valid], pred_z[pred_valid]])
+    gt_points = np.column_stack([gt_x[gt_valid], gt_z[gt_valid]])
+
+    if len(pred_points) == 0 or len(gt_points) == 0:
+        return float('nan')
+
+    # Compute pairwise distances
+    dist_matrix = cdist(pred_points, gt_points, metric='euclidean')
+
+    # Forward: max over (min distance from each pred point to GT)
+    min_dist_pred_to_gt = np.min(dist_matrix, axis=1)
+    forward_hausdorff = np.max(min_dist_pred_to_gt)
+
+    # Backward: max over (min distance from each GT point to pred)
+    min_dist_gt_to_pred = np.min(dist_matrix, axis=0)
+    backward_hausdorff = np.max(min_dist_gt_to_pred)
+
+    # Hausdorff distance is the maximum of both directions
+    nn_hausdorff_dist = max(forward_hausdorff, backward_hausdorff)
+
+    return nn_hausdorff_dist
+
 # # Old one with single x vs z plots
 # # def save_test_indices_vs_original_pcl_plots(test_csv_path, original_csv_path, output_dir="./test_indices_vs_original",
 # #                                           range_resolution=0.05988024, intensity_threshold=0.1, azimuth=0.0,max_rows=None):
@@ -353,20 +524,20 @@ def save_test_indices_vs_original_pcl_plots(test_csv_path, original_csv_path, ou
             orig_x, orig_z = extract_pcl_points_from_row(original_row_data, range_resolution, intensity_threshold, azimuth, has_indices=False)
             test_x, test_z = extract_pcl_points_from_row(test_row_data, range_resolution, intensity_threshold, azimuth, has_indices=True)
 
-            print("Orig data length", len(orig_x), len(orig_z))
-            print("Test data length", len(test_x), len(test_z))
+            # Compute all 4 distance metrics
+            # Point-to-point (using index correspondence)
+            p2p_chamfer = compute_chamfer_distance(test_x, test_z, orig_x, orig_z)
+            p2p_hausdorff = compute_hausdorff_distance(test_x, test_z, orig_x, orig_z)
 
-            # Create figure with 3 subplots (1 row, 3 columns)
+            # Nearest neighbor (standard definition)
+            nn_chamfer = compute_nn_chamfer_distance(test_x, test_z, orig_x, orig_z)
+            nn_hausdorff = compute_nn_hausdorff_distance(test_x, test_z, orig_x, orig_z)
+
+            # Create figure
             if len(orig_x) > 0 or len(test_x) > 0:
-                # fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
                 fig, (ax1) = plt.subplots(1, 1, figsize=(12, 12))
 
-                # Subplot 1: Scatter plot (X vs Z)
-                # if len(orig_x) > 0:
-                #     ax1.scatter(orig_x, orig_z, c='blue', s=3, alpha=0.8, label=f'Original Row {original_row_idx}')
-                # if len(test_x) > 0:
-                #     ax1.scatter(test_x, test_z, c='red', s=2, alpha=0.6, label=f'Test Split Row {original_row_idx}')
-
+            # Filter and prepare point clouds for visualization
             if len(orig_x) > 0:
                 # Filter out -10 and -20 values from both x and z
                 orig_x_arr = np.array(orig_x, dtype=float)
@@ -389,88 +560,95 @@ def save_test_indices_vs_original_pcl_plots(test_csv_path, original_csv_path, ou
                     filtered_test_z = test_z_arr[test_mask]
                     ax1.scatter(filtered_test_x, filtered_test_z, c='red', s=2, alpha=0.6, label=f'Test Split Row {original_row_idx}')
 
-                ax1.set_xlabel('X (meters)')
-                ax1.set_ylabel('Z (meters)')
-                ax1.set_title(f'X vs Z - Row Index {original_row_idx}')
-                ax1.legend()
-                ax1.grid(True, alpha=0.3)
-                ax1.axis('equal')
-                ax1.axhline(y=0, color='gray', linestyle='--', alpha=0.3)
-                ax1.axvline(x=0, color='gray', linestyle='--', alpha=0.3)
+            # Update title with distance metrics
+            title_text = f'X vs Z - Row Index {original_row_idx}\n'
+            title_text += f'P2P: Chamfer={p2p_chamfer:.4f}m, Hausdorff={p2p_hausdorff:.4f}m\n'
+            title_text += f'NN: Chamfer={nn_chamfer:.4f}m, Hausdorff={nn_hausdorff:.4f}m'
 
-                # # Subplot 2: X points vs point index (0 to 668*4)
-                # point_indices = np.arange(len(orig_x)) if len(orig_x) > 0 else np.arange(len(test_x))
+            ax1.set_xlabel('X (meters)')
+            ax1.set_ylabel('Z (meters)')
+            ax1.set_title(title_text, fontsize=10)
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            ax1.axis('equal')
+            ax1.axhline(y=0, color='gray', linestyle='--', alpha=0.3)
+            ax1.axvline(x=0, color='gray', linestyle='--', alpha=0.3)
 
-                # if len(orig_x) > 0:
-                #     ax2.plot(point_indices[:len(orig_x)], orig_x, 'b-', linewidth=1, alpha=0.8, label='Original X')
-                # if len(test_x) > 0:
-                #     ax2.plot(point_indices[:len(test_x)], test_x, 'r-', linewidth=1, alpha=0.8, label='Test X')
+            # # Subplot 2: X points vs point index (0 to 668*4)
+            # point_indices = np.arange(len(orig_x)) if len(orig_x) > 0 else np.arange(len(test_x))
 
-                # ax2.set_xlabel('Point Index (0 to 668×4)')
-                # ax2.set_ylabel('X (meters)')
-                # ax2.set_title(f'X Coordinates - Row Index {original_row_idx}')
-                # ax2.legend()
-                # ax2.grid(True, alpha=0.3)
+            # if len(orig_x) > 0:
+            #     ax2.plot(point_indices[:len(orig_x)], orig_x, 'b-', linewidth=1, alpha=0.8, label='Original X')
+            # if len(test_x) > 0:
+            #     ax2.plot(point_indices[:len(test_x)], test_x, 'r-', linewidth=1, alpha=0.8, label='Test X')
 
-                # Subplot 3: Z points vs point index (0 to 668*4)
-                # uncomment to remove filtering -10 and -20
-                # if len(orig_z) > 0:
-                #     ax3.plot(point_indices[:len(orig_z)], orig_z, 'b-', linewidth=1, alpha=0.8, label='Original Phi')
-                # if len(test_z) > 0:
-                #     ax3.plot(point_indices[:len(test_z)], test_z, 'r-', linewidth=1, alpha=0.8, label='Test Phi')
+            # ax2.set_xlabel('Point Index (0 to 668×4)')
+            # ax2.set_ylabel('X (meters)')
+            # ax2.set_title(f'X Coordinates - Row Index {original_row_idx}')
+            # ax2.legend()
+            # ax2.grid(True, alpha=0.3)
 
-                # if len(orig_z) > 0:
-                #     # Filter out -10 and -20 values
-                #     orig_mask = (np.array(orig_z) != -10) & (np.array(orig_z) != -20)
-                #     if np.any(orig_mask):
-                #         filtered_orig_z = np.array(orig_z)[orig_mask]
-                #         filtered_orig_indices = np.arange(len(orig_z))[orig_mask]
-                #         ax3.scatter(filtered_orig_indices, filtered_orig_z, c='blue', s=2, alpha=0.8, label='Original Phi')
+            # Subplot 3: Z points vs point index (0 to 668*4)
+            # uncomment to remove filtering -10 and -20
+            # if len(orig_z) > 0:
+            #     ax3.plot(point_indices[:len(orig_z)], orig_z, 'b-', linewidth=1, alpha=0.8, label='Original Phi')
+            # if len(test_z) > 0:
+            #     ax3.plot(point_indices[:len(test_z)], test_z, 'r-', linewidth=1, alpha=0.8, label='Test Phi')
 
-                # if len(orig_z) > 0:
-                #     orig_z = np.array(orig_z).reshape(668, 4)
-                #     for point_idx in range(668):
-                #         for beam_idx in range(4):
-                #             phi_val = orig_z[point_idx, beam_idx]
+            # if len(orig_z) > 0:
+            #     # Filter out -10 and -20 values
+            #     orig_mask = (np.array(orig_z) != -10) & (np.array(orig_z) != -20)
+            #     if np.any(orig_mask):
+            #         filtered_orig_z = np.array(orig_z)[orig_mask]
+            #         filtered_orig_indices = np.arange(len(orig_z))[orig_mask]
+            #         ax3.scatter(filtered_orig_indices, filtered_orig_z, c='blue', s=2, alpha=0.8, label='Original Phi')
 
-                #             # Filter out -10 and -20 values
-                #             # if phi_val not in [-10, -20]:
-                #             ax3.scatter(point_idx, phi_val, c='blue', s=30, alpha=0.8,marker='x',
-                #                             label='Original Phi' if (point_idx == 0 and beam_idx == 0) else "")
+            # if len(orig_z) > 0:
+            #     orig_z = np.array(orig_z).reshape(668, 4)
+            #     for point_idx in range(668):
+            #         for beam_idx in range(4):
+            #             phi_val = orig_z[point_idx, beam_idx]
 
-                # # if len(test_z) > 0:
-                # #     # Filter out -10 and -20 values
-                # #     test_mask = (np.array(test_z) != -10) & (np.array(test_z) != -20)
-                # #     if np.any(test_mask):
-                # #         filtered_test_z = np.array(test_z)[test_mask]
-                # #         filtered_test_indices = np.arange(len(test_z))[test_mask]
-                # #         ax3.scatter(filtered_test_indices, filtered_test_z, c='red', s=2, alpha=0.8, label='Test Phi')
+            #             # Filter out -10 and -20 values
+            #             # if phi_val not in [-10, -20]:
+            #             ax3.scatter(point_idx, phi_val, c='blue', s=30, alpha=0.8,marker='x',
+            #                             label='Original Phi' if (point_idx == 0 and beam_idx == 0) else "")
 
-                # if len(test_z) > 0:
-                #     test_z = np.array(test_z).reshape(668, 4)  # reshape flat array to (668,4)
-                #     for point_idx in range(668):
-                #         for beam_idx in range(4):
-                #             phi_val = test_z[point_idx, beam_idx]
+            # # if len(test_z) > 0:
+            # #     # Filter out -10 and -20 values
+            # #     test_mask = (np.array(test_z) != -10) & (np.array(test_z) != -20)
+            # #     if np.any(test_mask):
+            # #         filtered_test_z = np.array(test_z)[test_mask]
+            # #         filtered_test_indices = np.arange(len(test_z))[test_mask]
+            # #         ax3.scatter(filtered_test_indices, filtered_test_z, c='red', s=2, alpha=0.8, label='Test Phi')
 
-                #             # Filter out -10 and -20 values
-                #             # if phi_val not in [-10, -20]:
-                #             ax3.scatter(point_idx, phi_val, s=5, alpha=0.8,marker='o', facecolors='none', edgecolors='red',
-                #                             label='Test Phi' if (point_idx == 0 and beam_idx == 0) else "")
+            # if len(test_z) > 0:
+            #     test_z = np.array(test_z).reshape(668, 4)  # reshape flat array to (668,4)
+            #     for point_idx in range(668):
+            #         for beam_idx in range(4):
+            #             phi_val = test_z[point_idx, beam_idx]
 
-                # ax3.set_xlabel('Point Index')
-                # ax3.set_ylabel('Z (meters)')
-                # # ax3.set_ylabel('Phi (Rads)')
-                # ax3.set_title(f'Z Coordinates - Row Index {original_row_idx}')
-                # ax3.legend(loc = 'upper right')
-                # ax3.grid(True, alpha=0.3)
+            #             # Filter out -10 and -20 values
+            #             # if phi_val not in [-10, -20]:
+            #             ax3.scatter(point_idx, phi_val, s=5, alpha=0.8,marker='o', facecolors='none', edgecolors='red',
+            #                             label='Test Phi' if (point_idx == 0 and beam_idx == 0) else "")
 
-                plt.tight_layout()
-                plt.savefig(f"{output_dir}/row_index_{int(original_row_idx):04d}.png", dpi=300, bbox_inches='tight')
-                plt.show()
-                plt.close()
+            # ax3.set_xlabel('Point Index')
+            # ax3.set_ylabel('Z (meters)')
+            # # ax3.set_ylabel('Phi (Rads)')
+            # ax3.set_title(f'Z Coordinates - Row Index {original_row_idx}')
+            # ax3.legend(loc = 'upper right')
+            # ax3.grid(True, alpha=0.3)
 
-                if i < 5:  # Print first few for verification
-                    print(f"Plotted row index {original_row_idx}: Original={len(orig_x)}, Test={len(test_x)} points")
+            plt.tight_layout()
+            plt.savefig(f"{output_dir}/row_index_{int(original_row_idx):04d}.png", dpi=300, bbox_inches='tight')
+            # plt.show()
+            plt.close()
+
+            if i < 5:  # Print first few for verification
+                print(f"Plotted row index {original_row_idx}: Original={len(orig_x)}, Test={len(test_x)} points")
+                print(f"  P2P - Chamfer: {p2p_chamfer:.4f}m, Hausdorff: {p2p_hausdorff:.4f}m")
+                print(f"  NN  - Chamfer: {nn_chamfer:.4f}m, Hausdorff: {nn_hausdorff:.4f}m")
 
         except Exception as e:
             print(f"Error processing row {i} (original index {original_row_idx}): {e}")
@@ -482,7 +660,7 @@ def main():
     # predictions_with_indices_path = "./data_splits/train_predictions_with_indices.csv"
     # predictions_with_indices_path = "./data_splits/test_predictions_final.csv"
     # predictions_with_indices_path = "./data_splits/test_predictions_two_stage.csv"
-    predictions_with_indices_path = "./data_splits/test_predictions_full_three_stage.csv"
+    predictions_with_indices_path = "./data_splits/train_predictions_full_three_stage.csv"
     # save_predictions_with_indices_to_csv(
     #     results['tangent'],
     #     results['phi'],
@@ -492,9 +670,9 @@ def main():
     # Generate comparison plots
     save_test_indices_vs_original_pcl_plots(
         test_csv_path=predictions_with_indices_path,
-        original_csv_path="/Users/farhang/Downloads/fls_all_with_phi.csv",
-        output_dir="./test_indices_vs_original",
-        specific_row_idx=2
+        original_csv_path="/home/farhang/Downloads/fls_all_with_phi_long.csv",
+        output_dir="./train_indices_vs_original"
+        # specific_row_idx=15001
 
     )
 
