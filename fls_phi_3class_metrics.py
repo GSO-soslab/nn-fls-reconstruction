@@ -11,38 +11,47 @@ import numpy as np
 from torch.utils.data import DataLoader, ConcatDataset
 from full_three_stage_model import FullThreeStageModelCNN, BathymetryDataset
 
+# Set global font sizes for labels and titles (but keep tick labels moderate)
+plt.rcParams.update({
+    'axes.labelsize': 20,      # X and Y labels (bigger)
+    'axes.titlesize': 22,      # Plot titles (bigger)
+    'legend.fontsize': 16,     # Legend text (bigger)
+    'xtick.labelsize': 14,     # X-axis tick numbers (moderate)
+    'ytick.labelsize': 14,     # Y-axis tick numbers (moderate)
+})
+
 
 def calculate_metrics_from_inference(model, test_loader, device):
     """Calculate 3-class metrics directly from model inference"""
     model.eval()
     all_preds = []
     all_ground_truth = []
-    
+
     print("Running inference on dataset...")
     with torch.no_grad():
         for batch_idx, (intensities, ground_truth) in enumerate(test_loader):
             intensities = intensities.to(device)
             ground_truth = ground_truth.to(device)
-            
-            final_preds, _, _, _ = model(intensities, training=False)
-            
+
+            final_preds, _, _, _ = model(intensities)
+
             all_preds.append(final_preds.cpu().numpy())
             all_ground_truth.append(ground_truth.cpu().numpy())
-            
+
             if (batch_idx + 1) % 10 == 0:
                 print(f"  Processed {batch_idx + 1} batches...")
-    
+
     # Flatten and concatenate all batches
     preds = np.concatenate([p.flatten() for p in all_preds])
     gt = np.concatenate([g.flatten() for g in all_ground_truth])
-    
+
     print(f"\nTotal predictions: {len(preds)}")
     print(f"Total ground truth: {len(gt)}")
-    
+
     # Convert to 3-class labels
     gt_classes = classify_phi_values(gt)
     pred_classes = classify_phi_values(preds)
-    
+
     return gt, preds, gt_classes, pred_classes
 
 
@@ -107,23 +116,23 @@ def calculate_regression_metrics(y_true, y_pred):
     """
     y_true = np.array(y_true).flatten()
     y_pred = np.array(y_pred).flatten()
-    
+
     # Create mask for valid measurements (not -10 or -20)
     valid_mask = (y_true != -10.0) & (y_true != -20.0) & (y_pred != -10.0) & (y_pred != -20.0)
-    
+
     # Filter to only valid points
     y_true_valid = y_true[valid_mask]
     y_pred_valid = y_pred[valid_mask]
-    
+
     if len(y_true_valid) == 0:
         print("Warning: No valid data points found!")
         return None
-    
+
     # Calculate metrics
     mse = np.mean((y_true_valid - y_pred_valid) ** 2)
     mae = np.mean(np.abs(y_true_valid - y_pred_valid))
     rmse = np.sqrt(mse)
-    
+
     print(f"\n{'='*70}")
     print(f"Regression Metrics (Valid Data Points Only)")
     print(f"{'='*70}")
@@ -132,7 +141,7 @@ def calculate_regression_metrics(y_true, y_pred):
     print(f"RMSE: {rmse:.6f}")
     print(f"MAE:  {mae:.6f}")
     print(f"{'='*70}")
-    
+
     return {
         'mse': mse,
         'rmse': rmse,
@@ -175,7 +184,7 @@ def plot_3class_confusion_matrix(original_phis, predicted_phis, output_dir="./",
     cm = confusion_matrix(y_true, y_pred)
     cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
 
-    class_names = ['Valid', '\n(-10)', '\n(-20)']
+    class_names = ['Valid', 'Partial Return', 'No-return']
 
     # Plot
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
@@ -239,9 +248,9 @@ def plot_metrics_breakdown(metrics, output_dir="./", title_suffix=""):
     bottom_vals = np.array(tp_vals) + np.array(fp_vals)
     ax1.bar(x, fn_vals, width, bottom=bottom_vals, label='False Negatives', color='orange', alpha=0.8)
 
-    ax1.set_xlabel('Class', fontsize=12)
-    ax1.set_ylabel('Count', fontsize=12)
-    ax1.set_title(f'TP/FP/FN per Class {title_suffix}', fontsize=14)
+    ax1.set_xlabel('Class')  # Uses global fontsize
+    ax1.set_ylabel('Count')  # Uses global fontsize
+    ax1.set_title(f'TP/FP/FN per Class {title_suffix}')  # Uses global fontsize
     ax1.set_xticks(x)
     ax1.set_xticklabels(class_names)
     ax1.legend()
@@ -259,9 +268,9 @@ def plot_metrics_breakdown(metrics, output_dir="./", title_suffix=""):
     ax2.bar(x_pos, recall_vals, width, label='Recall', color='green', alpha=0.8)
     ax2.bar(x_pos + width, f1_vals, width, label='F1 Score', color='purple', alpha=0.8)
 
-    ax2.set_xlabel('Class', fontsize=12)
-    ax2.set_ylabel('Score', fontsize=12)
-    ax2.set_title(f'Precision/Recall/F1 per Class {title_suffix}', fontsize=14)
+    ax2.set_xlabel('Class')  # Uses global fontsize
+    ax2.set_ylabel('Score')  # Uses global fontsize
+    ax2.set_title(f'Precision/Recall/F1 per Class {title_suffix}')  # Uses global fontsize
     ax2.set_xticks(x_pos)
     ax2.set_xticklabels(class_names)
     ax2.set_ylim([0, 1.1])
@@ -275,42 +284,42 @@ def plot_metrics_breakdown(metrics, output_dir="./", title_suffix=""):
 
 def extract_and_print_classification_metrics(metrics, gt_classes, pred_classes):
     """Extract recall values from metrics dict and print combined report"""
-    
+
     class_keys = list(metrics.keys())
-    
+
     # Extract recall values from the metrics dictionary
     recall_valid = metrics[class_keys[0]]['Recall']
     recall_minus10 = metrics[class_keys[1]]['Recall']
     recall_minus20 = metrics[class_keys[2]]['Recall']
-    
+
     # Extract precision values
     precision_valid = metrics[class_keys[0]]['Precision']
     precision_minus10 = metrics[class_keys[1]]['Precision']
     precision_minus20 = metrics[class_keys[2]]['Precision']
-    
+
     # Extract F1 scores
     f1_valid = metrics[class_keys[0]]['F1']
     f1_minus10 = metrics[class_keys[1]]['F1']
     f1_minus20 = metrics[class_keys[2]]['F1']
-    
+
     # Calculate overall accuracy
     overall_accuracy = np.sum(gt_classes == pred_classes) / len(gt_classes)
-    
+
     print(f"\n{'='*80}")
     print(f"COMBINED MEASUREMENT QUALITY REPORT")
     print(f"{'='*80}")
-    
+
     print(f"\nReturn Classification Performance:")
     print(f"{'='*80}")
     print(f"{'Class':<20} {'Recall':>12} {'Precision':>12} {'F1-Score':>12}")
     print(f"{'-'*80}")
     print(f"{'Valid':<20} {recall_valid*100:>11.1f}% {precision_valid*100:>11.1f}% {f1_valid*100:>11.1f}%")
-    print(f"{'Partial (-10)':<20} {recall_minus10*100:>11.1f}% {precision_minus10*100:>11.1f}% {f1_minus10*100:>11.1f}%")
-    print(f"{'Out-of-range (-20)':<20} {recall_minus20*100:>11.1f}% {precision_minus20*100:>11.1f}% {f1_minus20*100:>11.1f}%")
+    print(f"{'Partial Return':<20} {recall_minus10*100:>11.1f}% {precision_minus10*100:>11.1f}% {f1_minus10*100:>11.1f}%")
+    print(f"{'No-return':<20} {recall_minus20*100:>11.1f}% {precision_minus20*100:>11.1f}% {f1_minus20*100:>11.1f}%")
     print(f"{'-'*80}")
     print(f"{'Overall Accuracy':<20} {overall_accuracy*100:>11.1f}%")
     print(f"{'='*80}")
-    
+
     return {
         'recall_valid': recall_valid,
         'recall_minus10': recall_minus10,
@@ -329,35 +338,35 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else
                           'mps' if torch.backends.mps.is_available() else
                           'cpu')
-    
+
     output_dir = "./confusion_matrix_results"
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # Load all splits
     print("Loading datasets...")
     train_csv = "./data_splits/train_data.csv"
     val_csv = "./data_splits/val_data.csv"
     test_csv = "./data_splits/test_data.csv"
-    
+
     train_dataset = BathymetryDataset(train_csv, prediction_type='phi')
     val_dataset = BathymetryDataset(val_csv, prediction_type='phi')
     test_dataset = BathymetryDataset(test_csv, prediction_type='phi')
-    
+
     print(f"Train set size: {len(train_dataset)}")
     print(f"Val set size: {len(val_dataset)}")
     print(f"Test set size: {len(test_dataset)}")
-    
+
     # Create combined dataset
     combined_dataset = ConcatDataset([train_dataset, val_dataset, test_dataset])
     combined_loader = DataLoader(combined_dataset, batch_size=8, shuffle=False)
-    
+
     print(f"Combined set size: {len(combined_dataset)}")
-    
+
     # Load model
     print("\nLoading model...")
     model = FullThreeStageModelCNN(prediction_type='phi', dropout_rate=0.1)
     model_path = 'best_full_three_stage_model.pth'
-    
+
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.to(device)
@@ -365,26 +374,26 @@ def main():
     else:
         print(f"ERROR: Model not found at {model_path}")
         return
-    
+
     # Calculate metrics from inference on combined dataset
     print("\n" + "="*60)
     print("CALCULATING METRICS FROM DIRECT INFERENCE (COMBINED)")
     print("="*60)
-    
+
     gt_values, pred_values, gt_classes, pred_classes = calculate_metrics_from_inference(
         model, combined_loader, device
     )
-    
+
     # Calculate regression metrics (MSE, MAE, RMSE) for valid data only
     print("\n" + "="*60)
     print("REGRESSION METRICS")
     print("="*60)
     regression_metrics = calculate_regression_metrics(gt_values, pred_values)
-    
+
     # Save regression metrics to file
     if regression_metrics:
         with open(f"{output_dir}/regression_metrics_combined.txt", 'w') as f:
-            f.write(f"Regression Metrics (Combined: Train+Val+Test)\n")
+            f.write(f"Regression Metrics (Train+Val+Test)\n")
             f.write(f"Valid Data Points Only\n")
             f.write(f"{'='*70}\n")
             f.write(f"Total valid points: {regression_metrics['n_valid']} out of {regression_metrics['n_total']} ")
@@ -393,23 +402,23 @@ def main():
             f.write(f"RMSE: {regression_metrics['rmse']:.6f}\n")
             f.write(f"MAE:  {regression_metrics['mae']:.6f}\n")
         print(f"Regression metrics saved to {output_dir}/regression_metrics_combined.txt")
-    
+
     # Plot confusion matrix
     print("\nGenerating confusion matrix...")
     cm, cm_norm, metrics = plot_3class_confusion_matrix(
         gt_values,
         pred_values,
         output_dir=output_dir,
-        title_suffix="(Combined: Train+Val+Test)"
+        title_suffix="(Train+Val+Test)"
     )
-    
+
     # Plot metrics breakdown
     print("Generating metrics breakdown...")
-    plot_metrics_breakdown(metrics, output_dir=output_dir, title_suffix="(Combined: Train+Val+Test)")
-    
+    plot_metrics_breakdown(metrics, output_dir=output_dir, title_suffix="(Train+Val+Test)")
+
     # Extract and print classification metrics
     class_metrics = extract_and_print_classification_metrics(metrics, gt_classes, pred_classes)
-    
+
     # Save to file
     with open(f"{output_dir}/classification_metrics_combined.txt", 'w') as f:
         f.write(f"Return Classification Performance (Combined: Train+Val+Test)\n")
@@ -417,11 +426,11 @@ def main():
         f.write(f"{'Class':<20} {'Recall':>12} {'Precision':>12} {'F1-Score':>12}\n")
         f.write(f"{'-'*80}\n")
         f.write(f"{'Valid':<20} {class_metrics['recall_valid']*100:>11.1f}% {class_metrics['precision_valid']*100:>11.1f}% {class_metrics['f1_valid']*100:>11.1f}%\n")
-        f.write(f"{'Partial (-10)':<20} {class_metrics['recall_minus10']*100:>11.1f}% {class_metrics['precision_minus10']*100:>11.1f}% {class_metrics['f1_minus10']*100:>11.1f}%\n")
-        f.write(f"{'Out-of-range (-20)':<20} {class_metrics['recall_minus20']*100:>11.1f}% {class_metrics['precision_minus20']*100:>11.1f}% {class_metrics['f1_minus20']*100:>11.1f}%\n")
+        f.write(f"{'Partial Return':<20} {class_metrics['recall_minus10']*100:>11.1f}% {class_metrics['precision_minus10']*100:>11.1f}% {class_metrics['f1_minus10']*100:>11.1f}%\n")
+        f.write(f"{'No-return':<20} {class_metrics['recall_minus20']*100:>11.1f}% {class_metrics['precision_minus20']*100:>11.1f}% {class_metrics['f1_minus20']*100:>11.1f}%\n")
         f.write(f"{'-'*80}\n")
         f.write(f"{'Overall Accuracy':<20} {class_metrics['overall_accuracy']*100:>11.1f}%\n")
-    
+
     print(f"\nResults saved to: {output_dir}/")
     print("="*60)
 

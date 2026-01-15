@@ -1,7 +1,7 @@
-Regression Metrics (Combined: Train+Val+Test)
+Regression Metrics (Train+Val+Test)
 Valid Data Points Only
 ======================================================================
-Total valid points: 88877 out of 2730784 (3.3%)
-MSE:  0.000339
-RMSE: 0.018416
-MAE:  0.011312
+Total valid points: 1504925 out of 47900944 (3.1%)
+MSE:  0.000139
+RMSE: 0.011790
+MAE:  0.005421

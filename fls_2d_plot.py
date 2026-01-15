@@ -8,7 +8,7 @@ from os import makedirs
 makedirs('./saved', exist_ok=True)
 
 # Set to True for animation, False for single frame
-ANIMATE = True
+ANIMATE = False
 FRAME_DELAY = 0.005  # seconds between frames
 
 # Read file and split by chunks (separated by empty lines)

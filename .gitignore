@@ -22,7 +22,9 @@ Thumbs.db
 *.out
 *.pyc
 *.pyo
+*.ply
 *.pyd
+*.mcap
 __pycache__/
 build/
 dist/

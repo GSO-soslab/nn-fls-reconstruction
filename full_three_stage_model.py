@@ -863,7 +863,7 @@ def run_inference_for_csv(dataset, model, device):
 # ==============================================================================
 
 def main():
-    csv_file = '/home/farhang/Downloads/fls_all_with_phi_long.csv'
+    csv_file = '/Users/farhang/Downloads/fls_all_with_phis_long.csv'
 
     print("\n" + "="*60)
     print("FULL THREE-STAGE MODEL: NEURAL -20 + TRANSFORMER + REGRESSOR")
