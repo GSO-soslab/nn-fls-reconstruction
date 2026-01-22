@@ -53,6 +53,7 @@ class FLSPointCloudReconstructor:
         self.intensities = []
         self.mbes_points = []  # MBES points (x, y, z)
         self.tf_tree = {}  # Store TF transforms
+        self.gt_odom = []  # Store ground truth odometry messages
 
     def build_tf_tree(self, tf_messages):
         """
@@ -63,8 +64,11 @@ class FLSPointCloudReconstructor:
         from the child frame and expresses it in the parent frame.
         T_parent_child @ point_in_child = point_in_parent
         """
-        for timestamp, tf_msg in tf_messages:
+        for _, tf_msg in tf_messages:
             for transform in tf_msg.transforms:
+                # Use transform's header timestamp, not bag log_time
+                header_stamp = transform.header.stamp
+                timestamp_ns = int(header_stamp.sec * 1e9 + header_stamp.nanosec)
                 parent = transform.header.frame_id
                 child = transform.child_frame_id
                 key = f"{parent}->{child}"
@@ -73,7 +77,7 @@ class FLSPointCloudReconstructor:
                     self.tf_tree[key] = []
 
                 self.tf_tree[key].append({
-                    'timestamp': timestamp,
+                    'timestamp': timestamp_ns,
                     'translation': np.array([
                         transform.transform.translation.x,
                         transform.transform.translation.y,
@@ -95,6 +99,122 @@ class FLSPointCloudReconstructor:
         for key in self.tf_tree:
             print(f"  {key}: {len(self.tf_tree[key])} transforms")
 
+    def build_gt_odom_list(self, odom_messages):
+        """
+        Build ground truth odometry list from collected messages.
+        odom_messages: list of (timestamp_ns, Odometry) tuples
+        """
+        for timestamp_ns, odom_msg in odom_messages:
+            pose = odom_msg.pose.pose
+            self.gt_odom.append({
+                'timestamp': timestamp_ns,
+                'position': np.array([
+                    pose.position.x,
+                    pose.position.y,
+                    pose.position.z
+                ]),
+                'orientation': np.array([
+                    pose.orientation.x,
+                    pose.orientation.y,
+                    pose.orientation.z,
+                    pose.orientation.w
+                ])
+            })
+
+        # Sort by timestamp
+        self.gt_odom.sort(key=lambda x: x['timestamp'])
+        print(f"Built ground truth odom list with {len(self.gt_odom)} messages")
+
+    def lookup_gt_odom(self, timestamp):
+        """
+        Look up ground truth odometry at a given timestamp with interpolation.
+        Returns (position, rotation_matrix) for base_link in world frame.
+        """
+        if len(self.gt_odom) == 0:
+            return None, None
+
+        # Find odom before and after timestamp
+        before = None
+        after = None
+
+        for i, odom in enumerate(self.gt_odom):
+            if odom['timestamp'] <= timestamp:
+                before = odom
+            if odom['timestamp'] >= timestamp:
+                after = odom
+                break
+
+        if before is None and after is None:
+            return None, None
+
+        if before is None:
+            pos = after['position']
+            rot = self.quaternion_to_rotation_matrix(*after['orientation'])
+            return pos, rot
+
+        if after is None:
+            pos = before['position']
+            rot = self.quaternion_to_rotation_matrix(*before['orientation'])
+            return pos, rot
+
+        if before['timestamp'] == after['timestamp']:
+            pos = before['position']
+            rot = self.quaternion_to_rotation_matrix(*before['orientation'])
+            return pos, rot
+
+        # Interpolate
+        dt = after['timestamp'] - before['timestamp']
+        alpha = (timestamp - before['timestamp']) / dt
+
+        pos = (1 - alpha) * before['position'] + alpha * after['position']
+        q_interp = self.slerp_quaternion(before['orientation'], after['orientation'], alpha)
+        rot = self.quaternion_to_rotation_matrix(*q_interp)
+
+        return pos, rot
+
+    def get_transform_with_gt_odom(self, from_frame, timestamp):
+        """
+        Get transform from sensor frame to world using ground truth odometry
+        for base_link->world, and TF for static sensor->base_link chain.
+
+        Returns (translation, rotation_matrix) that takes points from from_frame to world.
+        """
+        # Get base_link pose in world from ground truth odometry
+        base_pos, base_rot = self.lookup_gt_odom(timestamp)
+        if base_pos is None:
+            print("WARNING: Could not find ground truth odom at timestamp")
+            return np.array([0.0, 0.0, 0.0]), np.eye(3)
+
+        # Get static transform chain: sensor -> nose_tip -> base_link
+        if 'fls' in from_frame:
+            sensor_child = 'mvp2_test_robot/fls_link_sf'
+        elif 'mbes' in from_frame:
+            sensor_child = 'mvp2_test_robot/mbes_link_sf'
+        else:
+            return base_pos, base_rot
+
+        # nose_tip->sensor (static)
+        t1, R1 = self.lookup_single_transform('mvp2_test_robot/nose_tip_link',
+                                               sensor_child, timestamp)
+        if t1 is None:
+            t1, R1 = np.array([0.0, 0.0, 0.0]), np.eye(3)
+
+        # base_link->nose_tip (static)
+        t2, R2 = self.lookup_single_transform('mvp2_test_robot/base_link',
+                                               'mvp2_test_robot/nose_tip_link', timestamp)
+        if t2 is None:
+            t2, R2 = np.array([0.0, 0.0, 0.0]), np.eye(3)
+
+        # Chain: sensor -> nose_tip -> base_link
+        R_base_sensor = R2 @ R1
+        t_base_sensor = R2 @ t1 + t2
+
+        # Apply base_link -> world from GT odom
+        R_combined = base_rot @ R_base_sensor
+        t_combined = base_rot @ t_base_sensor + base_pos
+
+        return t_combined, R_combined
+
     def quaternion_to_rotation_matrix(self, qx, qy, qz, qw):
         """Convert quaternion to 3x3 rotation matrix"""
         R = np.array([
@@ -104,26 +224,107 @@ class FLSPointCloudReconstructor:
         ])
         return R
 
+    def slerp_quaternion(self, q0, q1, t):
+        """
+        Spherical linear interpolation between quaternions.
+        q0, q1: quaternions as [x, y, z, w]
+        t: interpolation factor (0 = q0, 1 = q1)
+        Returns interpolated quaternion [x, y, z, w]
+        """
+        # Normalize quaternions
+        q0 = np.array(q0)
+        q1 = np.array(q1)
+        q0 = q0 / np.linalg.norm(q0)
+        q1 = q1 / np.linalg.norm(q1)
+
+        # Compute dot product
+        dot = np.dot(q0, q1)
+
+        # If dot is negative, negate one quaternion to take shorter path
+        if dot < 0:
+            q1 = -q1
+            dot = -dot
+
+        # If quaternions are very close, use linear interpolation
+        if dot > 0.9995:
+            result = q0 + t * (q1 - q0)
+            return result / np.linalg.norm(result)
+
+        # SLERP
+        theta_0 = np.arccos(dot)
+        theta = theta_0 * t
+
+        q2 = q1 - q0 * dot
+        q2 = q2 / np.linalg.norm(q2)
+
+        result = q0 * np.cos(theta) + q2 * np.sin(theta)
+        return result
+
     def lookup_single_transform(self, parent_frame, child_frame, timestamp):
         """
-        Look up a single transform from the TF tree.
+        Look up a single transform from the TF tree with interpolation.
         Returns (translation, rotation_matrix) for parent->child transform.
         This transform takes points from child frame to parent frame:
             point_in_parent = R @ point_in_child + t
+
+        Uses linear interpolation for translation and SLERP for rotation
+        to get accurate transforms at the exact sensor timestamp.
         """
         key = f"{parent_frame}->{child_frame}"
 
-        if key in self.tf_tree and len(self.tf_tree[key]) > 0:
-            transforms = self.tf_tree[key]
-            closest = min(transforms, key=lambda t: abs(t['timestamp'] - timestamp))
+        if key not in self.tf_tree or len(self.tf_tree[key]) == 0:
+            return None, None
 
-            translation = closest['translation']
-            qx, qy, qz, qw = closest['rotation']
+        transforms = self.tf_tree[key]
+
+        # Find transforms before and after timestamp for interpolation
+        before = None
+        after = None
+
+        for i, tf in enumerate(transforms):
+            if tf['timestamp'] <= timestamp:
+                before = tf
+            if tf['timestamp'] >= timestamp:
+                after = tf
+                break
+
+        # Handle edge cases
+        if before is None and after is None:
+            return None, None
+
+        if before is None:
+            # Timestamp is before all transforms, use first one
+            translation = after['translation']
+            qx, qy, qz, qw = after['rotation']
             rotation = self.quaternion_to_rotation_matrix(qx, qy, qz, qw)
-
             return translation, rotation
 
-        return None, None
+        if after is None:
+            # Timestamp is after all transforms, use last one
+            translation = before['translation']
+            qx, qy, qz, qw = before['rotation']
+            rotation = self.quaternion_to_rotation_matrix(qx, qy, qz, qw)
+            return translation, rotation
+
+        # Check if we have the exact timestamp
+        if before['timestamp'] == after['timestamp']:
+            translation = before['translation']
+            qx, qy, qz, qw = before['rotation']
+            rotation = self.quaternion_to_rotation_matrix(qx, qy, qz, qw)
+            return translation, rotation
+
+        # Interpolate between before and after
+        dt = after['timestamp'] - before['timestamp']
+        alpha = (timestamp - before['timestamp']) / dt
+
+        # Linear interpolation for translation
+        translation = (1 - alpha) * before['translation'] + alpha * after['translation']
+
+        # SLERP for rotation
+        q_interp = self.slerp_quaternion(before['rotation'], after['rotation'], alpha)
+        rotation = self.quaternion_to_rotation_matrix(*q_interp)
+
+        return translation, rotation
 
     def get_transform_at_time(self, from_frame, to_frame, timestamp):
         """
@@ -337,7 +538,8 @@ class FLSPointCloudReconstructor:
             angle += msg.angle_increment
 
     def process_bag(self, bag_path, fls_topic, mbes_topic, use_tf,
-                    sonar_frame, mbes_frame, world_frame):
+                    sonar_frame, mbes_frame, world_frame,
+                    use_gt_odom=False, gt_odom_topic=None):
         """
         Process ROS 2 bag file (MCAP format) and extract FLS and MBES point clouds.
 
@@ -349,25 +551,44 @@ class FLSPointCloudReconstructor:
             sonar_frame: Frame ID of the FLS sonar
             mbes_frame: Frame ID of the MBES sensor
             world_frame: World frame ID (usually 'odom' or 'map')
+            use_gt_odom: Whether to use ground truth odometry instead of TF for robot pose
+            gt_odom_topic: Topic name for ground truth odometry (required if use_gt_odom=True)
         """
         print(f"Processing MCAP bag: {bag_path}")
         bag_path = Path(bag_path)
 
         tf_messages = []
+        gt_odom_messages = []
         print("Sonar frame:", sonar_frame, "MBES frame:", mbes_frame, "World frame:", world_frame)
-        # First pass: collect TF data
-        if use_tf:
-            print("Collecting TF data...")
+        if use_gt_odom:
+            if gt_odom_topic is None:
+                raise ValueError("gt_odom_topic must be specified when use_gt_odom=True")
+            print(f"Using ground truth odometry from: {gt_odom_topic}")
+
+        # First pass: collect TF data and/or ground truth odometry
+        if use_tf or use_gt_odom:
+            print("Collecting TF/odometry data...")
             with open(bag_path, 'rb') as f:
                 for mcap_msg in read_ros2_messages(f):
                     if mcap_msg.channel.topic in ['/tf', '/tf_static']:
                         tf_messages.append((mcap_msg.log_time, mcap_msg.ros_msg))
+                    elif use_gt_odom and mcap_msg.channel.topic == gt_odom_topic:
+                        header_stamp = mcap_msg.ros_msg.header.stamp
+                        timestamp_ns = int(header_stamp.sec * 1e9 + header_stamp.nanosec)
+                        gt_odom_messages.append((timestamp_ns, mcap_msg.ros_msg))
 
             print(f"Collected {len(tf_messages)} TF messages")
             if len(tf_messages) > 0:
                 self.build_tf_tree(tf_messages)
             else:
-                print("WARNING: No TF messages found! Will use identity transforms.")
+                print("WARNING: No TF messages found! Will use identity transforms for static frames.")
+
+            if use_gt_odom:
+                print(f"Collected {len(gt_odom_messages)} ground truth odometry messages")
+                if len(gt_odom_messages) > 0:
+                    self.build_gt_odom_list(gt_odom_messages)
+                else:
+                    print("WARNING: No ground truth odometry messages found!")
 
         # Second pass: process FLS and MBES messages
         print(f"Processing FLS messages from topic: {fls_topic}")
@@ -385,9 +606,15 @@ class FLSPointCloudReconstructor:
                     # Run inference to get phi angles
                     phi_angles = self.run_inference(image_tensor)
 
-                    if use_tf:
-                        # Get full transform from TF (sonar frame -> world frame)
-                        timestamp_ns = mcap_msg.log_time
+                    # Get timestamp from message header
+                    header_stamp = mcap_msg.ros_msg.header.stamp
+                    timestamp_ns = int(header_stamp.sec * 1e9 + header_stamp.nanosec)
+
+                    if use_gt_odom:
+                        # Use ground truth odometry for base_link pose + TF for static sensor transforms
+                        position, rotation = self.get_transform_with_gt_odom(sonar_frame, timestamp_ns)
+                    elif use_tf:
+                        # Use full TF chain
                         position, rotation = self.get_transform_at_time(
                             sonar_frame, world_frame, timestamp_ns
                         )
@@ -396,7 +623,7 @@ class FLSPointCloudReconstructor:
                         position = np.array([0.0, 0.0, 0.0])
                         rotation = np.eye(3)
 
-                    # Reconstruct 3D points using TF transform
+                    # Reconstruct 3D points
                     self.reconstruct_points(phi_angles, position, rotation)
                     fls_count += 1
 
@@ -405,8 +632,15 @@ class FLSPointCloudReconstructor:
 
                 # Process MBES messages
                 elif mcap_msg.channel.topic == mbes_topic:
-                    if use_tf:
-                        timestamp_ns = mcap_msg.log_time
+                    # Get timestamp from message header
+                    header_stamp = mcap_msg.ros_msg.header.stamp
+                    timestamp_ns = int(header_stamp.sec * 1e9 + header_stamp.nanosec)
+
+                    if use_gt_odom:
+                        # Use ground truth odometry for base_link pose + TF for static sensor transforms
+                        position, rotation = self.get_transform_with_gt_odom(mbes_frame, timestamp_ns)
+                    elif use_tf:
+                        # Use full TF chain
                         position, rotation = self.get_transform_at_time(
                             mbes_frame, world_frame, timestamp_ns
                         )
@@ -1134,6 +1368,10 @@ def main():
                        help='MBES LaserScan topic name')
     parser.add_argument('--no-tf', action='store_true',
                        help='Disable TF usage, assume identity transforms')
+    parser.add_argument('--use-gt-odom', action='store_true',
+                       help='Use ground truth odometry topic for robot pose instead of TF')
+    parser.add_argument('--gt-odom-topic', type=str,
+                       help='Ground truth odometry topic (required with --use-gt-odom)')
     parser.add_argument('--sonar-frame', type=str, default='mvp2_test_robot/fls_link_ros',
                        help='FLS sonar frame ID')
     parser.add_argument('--mbes-frame', type=str, default='mvp2_test_robot/mbes_link_sf',
@@ -1181,7 +1419,9 @@ def main():
         use_tf=not args.no_tf,
         sonar_frame=args.sonar_frame,
         mbes_frame=args.mbes_frame,
-        world_frame=args.world_frame
+        world_frame=args.world_frame,
+        use_gt_odom=args.use_gt_odom,
+        gt_odom_topic=args.gt_odom_topic
     )
 
     # Save FLS to PLY if requested

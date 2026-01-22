@@ -863,22 +863,19 @@ def run_inference_for_csv(dataset, model, device):
 # ==============================================================================
 
 def main():
-    csv_file = '/Users/farhang/Downloads/fls_all_with_phis_long.csv'
+    csv_file = '/home/farhang/fls_ws/src/fls_reconstruction/results/test/fls_all.csv'
 
     print("\n" + "="*60)
     print("FULL THREE-STAGE MODEL: NEURAL -20 + TRANSFORMER + REGRESSOR")
     print("="*60)
 
-    # Create splits
+    # Create splits (always recreate to use fresh data)
     splits_dir = "./data_splits"
-    if not os.path.exists(f"{splits_dir}/train_data.csv"):
-        print("\nCreating data splits...")
-        train_csv, val_csv, test_csv = save_splits_to_csv(csv_file, splits_dir)
-    else:
-        print("\nUsing existing data splits...")
-        train_csv = f"{splits_dir}/train_data.csv"
-        val_csv = f"{splits_dir}/val_data.csv"
-        test_csv = f"{splits_dir}/test_data.csv"
+    if os.path.exists(splits_dir):
+        import shutil
+        shutil.rmtree(splits_dir)
+    print("\nCreating data splits...")
+    train_csv, val_csv, test_csv = save_splits_to_csv(csv_file, splits_dir)
 
     # Load FULL datasets (including -20s)
     print("\nLoading full datasets (with -20s)...")
@@ -910,18 +907,17 @@ def main():
     else:
         device = torch.device('cpu')
 
+    # Always train a new model (delete old one if exists)
     if os.path.exists(model_path):
-        print(f"\nLoading existing model from {model_path}")
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        model.to(device)
-    else:
-        print("\nTraining new full three-stage model...")
-        model = train_full_three_stage_model(
-            model,
-            loaders['train'],
-            loaders['val'],
-            num_epochs=60
-        )
+        os.remove(model_path)
+
+    print("\nTraining new full three-stage model...")
+    model = train_full_three_stage_model(
+        model,
+        loaders['train'],
+        loaders['val'],
+        num_epochs=60
+    )
 
     # Test
     print("\n" + "="*60)
