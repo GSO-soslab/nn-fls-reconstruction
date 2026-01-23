@@ -21,6 +21,12 @@ except ImportError:
 # Import your model
 from full_three_stage_model import FullThreeStageModelCNN
 
+# Import trajectory metrics for odometry evaluation
+from trajectory_metrics import (
+    Trajectory, TrajectoryEvaluator, PoseRelation, DeltaUnit,
+    rotation_matrix_to_quaternion, plot_trajectory_comparison
+)
+
 
 class FLSPointCloudReconstructor:
     def __init__(self, model_path, max_range=40.0, min_range=0.5, num_bins=668, num_beams=4, device='cpu'):
@@ -54,6 +60,13 @@ class FLSPointCloudReconstructor:
         self.mbes_points = []  # MBES points (x, y, z)
         self.tf_tree = {}  # Store TF transforms
         self.gt_odom = []  # Store ground truth odometry messages
+
+        # Storage for odometry evaluation (GT vs TF comparison)
+        self.odom_eval_timestamps = []  # Timestamps for each collected pose
+        self.odom_eval_gt_positions = []  # GT odom positions [x, y, z]
+        self.odom_eval_gt_orientations = []  # GT odom quaternions [qx, qy, qz, qw]
+        self.odom_eval_tf_positions = []  # TF odom positions [x, y, z]
+        self.odom_eval_tf_orientations = []  # TF odom quaternions [qx, qy, qz, qw]
 
     def build_tf_tree(self, tf_messages):
         """
@@ -145,6 +158,7 @@ class FLSPointCloudReconstructor:
                 break
 
         if before is None and after is None:
+            print(f"  (GT odom lookup failed: query ts={timestamp}, odom range={self.gt_odom[0]['timestamp'] if len(self.gt_odom) > 0 else 'empty'} to {self.gt_odom[-1]['timestamp'] if len(self.gt_odom) > 0 else 'empty'})")
             return None, None
 
         if before is None:
@@ -185,6 +199,13 @@ class FLSPointCloudReconstructor:
             print("WARNING: Could not find ground truth odom at timestamp")
             return np.array([0.0, 0.0, 0.0]), np.eye(3)
 
+        # Convert GT odom from NED to FLU (ROS convention)
+        R_ned_to_flu = np.array([[1,  0,  0],
+                                [0, -1,  0],
+                                [0,  0, -1]])
+        base_pos = R_ned_to_flu @ base_pos
+        base_rot = R_ned_to_flu @ base_rot @ R_ned_to_flu.T
+        
         # Get static transform chain: sensor -> nose_tip -> base_link
         if 'fls' in from_frame:
             sensor_child = 'mvp2_test_robot/fls_link_sf'
@@ -209,7 +230,12 @@ class FLSPointCloudReconstructor:
         R_base_sensor = R2 @ R1
         t_base_sensor = R2 @ t1 + t2
 
-        # Apply base_link -> world from GT odom
+        # # Apply base_link -> world from GT odom
+        # t4, R4 = self.lookup_single_transform('mvp2_test_robot/world',
+        #                                'mvp2_test_robot/odom', timestamp)
+        # if t4 is not None:
+        #     base_rot = R4 @ base_rot
+        #     base_pos = R4 @ base_pos + t4
         R_combined = base_rot @ R_base_sensor
         t_combined = base_rot @ t_base_sensor + base_pos
 
@@ -560,35 +586,40 @@ class FLSPointCloudReconstructor:
         tf_messages = []
         gt_odom_messages = []
         print("Sonar frame:", sonar_frame, "MBES frame:", mbes_frame, "World frame:", world_frame)
-        if use_gt_odom:
-            if gt_odom_topic is None:
-                raise ValueError("gt_odom_topic must be specified when use_gt_odom=True")
-            print(f"Using ground truth odometry from: {gt_odom_topic}")
+        if use_gt_odom and gt_odom_topic is None:
+            raise ValueError("gt_odom_topic must be specified when use_gt_odom=True")
+        if gt_odom_topic:
+            print(f"Ground truth odometry topic: {gt_odom_topic}")
 
-        # First pass: collect TF data and/or ground truth odometry
-        if use_tf or use_gt_odom:
-            print("Collecting TF/odometry data...")
-            with open(bag_path, 'rb') as f:
-                for mcap_msg in read_ros2_messages(f):
-                    if mcap_msg.channel.topic in ['/tf', '/tf_static']:
-                        tf_messages.append((mcap_msg.log_time, mcap_msg.ros_msg))
-                    elif use_gt_odom and mcap_msg.channel.topic == gt_odom_topic:
-                        header_stamp = mcap_msg.ros_msg.header.stamp
-                        timestamp_ns = int(header_stamp.sec * 1e9 + header_stamp.nanosec)
-                        gt_odom_messages.append((timestamp_ns, mcap_msg.ros_msg))
+        # First pass: collect TF data and ground truth odometry
+        print("Collecting TF/odometry data...")
+        with open(bag_path, 'rb') as f:
+            for mcap_msg in read_ros2_messages(f):
+                if mcap_msg.channel.topic in ['/tf', '/tf_static']:
+                    tf_messages.append((mcap_msg.log_time, mcap_msg.ros_msg))
+                elif gt_odom_topic and mcap_msg.channel.topic == gt_odom_topic:
+                    header_stamp = mcap_msg.ros_msg.header.stamp
+                    timestamp_ns = int(header_stamp.sec * 1e9 + header_stamp.nanosec)
+                    gt_odom_messages.append((timestamp_ns, mcap_msg.ros_msg))
 
-            print(f"Collected {len(tf_messages)} TF messages")
-            if len(tf_messages) > 0:
-                self.build_tf_tree(tf_messages)
+        print(f"Collected {len(tf_messages)} TF messages")
+        if len(tf_messages) > 0:
+            self.build_tf_tree(tf_messages)
+        else:
+            print("WARNING: No TF messages found! Will use identity transforms for static frames.")
+
+        if gt_odom_topic:
+            print(f"Collected {len(gt_odom_messages)} ground truth odometry messages")
+            if len(gt_odom_messages) > 0:
+                self.build_gt_odom_list(gt_odom_messages)
+                # Print timestamp range for debugging
+                if len(self.gt_odom) > 0:
+                    first_ts = self.gt_odom[0]['timestamp']
+                    last_ts = self.gt_odom[-1]['timestamp']
+                    print(f"  GT Odom timestamp range: {first_ts} to {last_ts}")
+                    print(f"  GT Odom time span: {(last_ts - first_ts) / 1e9:.2f} seconds")
             else:
-                print("WARNING: No TF messages found! Will use identity transforms for static frames.")
-
-            if use_gt_odom:
-                print(f"Collected {len(gt_odom_messages)} ground truth odometry messages")
-                if len(gt_odom_messages) > 0:
-                    self.build_gt_odom_list(gt_odom_messages)
-                else:
-                    print("WARNING: No ground truth odometry messages found!")
+                print("WARNING: No ground truth odometry messages found!")
 
         # Second pass: process FLS and MBES messages
         print(f"Processing FLS messages from topic: {fls_topic}")
@@ -622,6 +653,24 @@ class FLSPointCloudReconstructor:
                         # Assume static pose at origin
                         position = np.array([0.0, 0.0, 0.0])
                         rotation = np.eye(3)
+                    if fls_count == 0:
+                        print(f"Actual pose used: t={position}, R=\n{rotation}")
+                        # Compare with TF path (even if using GT odom)
+                        tf_pos, tf_rot = self.get_transform_at_time(sonar_frame, world_frame, timestamp_ns)
+                        print(f"TF path pose: t={tf_pos}, R=\n{tf_rot}")
+
+                    # Always collect poses for odometry evaluation (GT vs TF comparison)
+                    # Get GT pose
+                    gt_pos, gt_rot = self.get_transform_with_gt_odom(sonar_frame, timestamp_ns)
+                    # Get TF pose
+                    tf_pos, tf_rot = self.get_transform_at_time(sonar_frame, world_frame, timestamp_ns)
+
+                    # Store for evaluation (both sources regardless of which is used for reconstruction)
+                    self.odom_eval_timestamps.append(timestamp_ns)
+                    self.odom_eval_gt_positions.append(gt_pos.copy())
+                    self.odom_eval_gt_orientations.append(rotation_matrix_to_quaternion(gt_rot))
+                    self.odom_eval_tf_positions.append(tf_pos.copy())
+                    self.odom_eval_tf_orientations.append(rotation_matrix_to_quaternion(tf_rot))
 
                     # Reconstruct 3D points
                     self.reconstruct_points(phi_angles, position, rotation)
@@ -654,6 +703,7 @@ class FLSPointCloudReconstructor:
                     if mbes_count % 100 == 0:
                         print(f"Processed {mbes_count} MBES messages, {len(self.mbes_points)} points")
 
+        print(f"  Last FLS timestamp: {timestamp_ns if fls_count > 0 else 'N/A'}")
         print(f"\nTotal FLS messages processed: {fls_count}")
         print(f"Total FLS points extracted: {len(self.points)}")
         print(f"Total MBES messages processed: {mbes_count}")
@@ -666,6 +716,175 @@ class FLSPointCloudReconstructor:
     def get_mbes_point_cloud(self):
         """Return MBES point cloud as numpy array (N, 3)"""
         return np.array(self.mbes_points)
+
+    def evaluate_odometry_drift(self, rpe_delta=1.0, rpe_delta_unit='seconds',
+                                 align=True, plot=False, save_plot_path=None):
+        """
+        Evaluate drift between ground truth odometry and TF-tree odometry.
+
+        Computes standard trajectory error metrics (Sturm et al., IROS 2012):
+            - ATE (Absolute Trajectory Error): Global trajectory consistency
+            - RPE (Relative Pose Error): Local drift over time intervals
+
+        Args:
+            rpe_delta: Interval for RPE computation (default: 1.0)
+            rpe_delta_unit: Unit for delta - 'seconds', 'meters', or 'frames'
+            align: Whether to align trajectories before ATE computation
+            plot: Whether to plot trajectory comparison
+            save_plot_path: Path to save plot (optional)
+
+        Returns:
+            dict with evaluation results, or None if insufficient data
+        """
+        if len(self.odom_eval_timestamps) < 2:
+            print("WARNING: Insufficient odometry data for evaluation.")
+            print("  Make sure to use --use-gt-odom with TF data available.")
+            return None
+
+        print(f"\n{'='*70}")
+        print("Odometry Drift Evaluation (GT vs TF)")
+        print(f"{'='*70}")
+        print(f"Poses collected: {len(self.odom_eval_timestamps)}")
+
+        # Build Trajectory objects
+        timestamps = np.array(self.odom_eval_timestamps)
+        gt_positions = np.array(self.odom_eval_gt_positions)
+        gt_orientations = np.array(self.odom_eval_gt_orientations)
+        tf_positions = np.array(self.odom_eval_tf_positions)
+        tf_orientations = np.array(self.odom_eval_tf_orientations)
+
+        traj_gt = Trajectory(timestamps, gt_positions, gt_orientations)
+        traj_tf = Trajectory(timestamps, tf_positions, tf_orientations)
+
+        # Compute trajectory stats
+        gt_dist = traj_gt.get_distances()[-1]
+        tf_dist = traj_tf.get_distances()[-1]
+        duration = (timestamps[-1] - timestamps[0]) / 1e9
+
+        print(f"Duration: {duration:.2f} s")
+        print(f"GT trajectory length: {gt_dist:.2f} m")
+        print(f"TF trajectory length: {tf_dist:.2f} m")
+
+        # Create evaluator (timestamps already matched)
+        evaluator = TrajectoryEvaluator(traj_tf, traj_gt, max_time_diff=1.0,
+                                         timestamp_unit="nanoseconds")
+
+        # Compute ATE (translation)
+        print(f"\n--- ATE (Absolute Trajectory Error) ---")
+        print(f"Alignment: {'enabled' if align else 'disabled'}")
+        ate_trans = evaluator.compute_ate(
+            pose_relation=PoseRelation.TRANSLATION_PART,
+            align=align,
+            with_scale=False
+        )
+        print(f"  Translation RMSE: {ate_trans.rmse:.4f} m")
+        print(f"  Translation Mean: {ate_trans.mean:.4f} m")
+        print(f"  Translation Std:  {ate_trans.std:.4f} m")
+        print(f"  Translation Max:  {ate_trans.max:.4f} m")
+
+        # Compute ATE (rotation)
+        ate_rot_stats = evaluator.compute_ate(
+            pose_relation=PoseRelation.ROTATION_ANGLE_DEG,
+            align=align,
+            with_scale=False
+        )
+        print(f"  Rotation RMSE: {ate_rot_stats.rmse:.4f} deg")
+        print(f"  Rotation Mean: {ate_rot_stats.mean:.4f} deg")
+        print(f"  Rotation Max:  {ate_rot_stats.max:.4f} deg")
+
+        # Compute RPE
+        delta_unit_map = {
+            'seconds': DeltaUnit.SECONDS,
+            'meters': DeltaUnit.METERS,
+            'frames': DeltaUnit.FRAMES
+        }
+        delta_unit = delta_unit_map.get(rpe_delta_unit, DeltaUnit.SECONDS)
+
+        print(f"\n--- RPE (Relative Pose Error) ---")
+        print(f"Delta: {rpe_delta} {rpe_delta_unit}")
+
+        try:
+            rpe_trans = evaluator.compute_rpe(
+                pose_relation=PoseRelation.TRANSLATION_PART,
+                delta=rpe_delta,
+                delta_unit=delta_unit
+            )
+            print(f"  Translation RMSE: {rpe_trans.rmse:.4f} m")
+            print(f"  Translation Mean: {rpe_trans.mean:.4f} m")
+            print(f"  Translation Std:  {rpe_trans.std:.4f} m")
+
+            # Compute drift rate
+            if rpe_delta_unit == 'seconds':
+                drift_rate = rpe_trans.rmse / rpe_delta
+                print(f"  Drift rate: {drift_rate:.4f} m/s")
+            elif rpe_delta_unit == 'meters':
+                drift_pct = (rpe_trans.rmse / rpe_delta) * 100
+                print(f"  Drift rate: {drift_pct:.2f} % of distance")
+        except ValueError as e:
+            print(f"  RPE computation failed: {e}")
+            rpe_trans = None
+
+        # Compute KITTI-style metrics if trajectory is long enough
+        if gt_dist >= 100:
+            print(f"\n--- KITTI-style Metrics ---")
+            kitti = evaluator.compute_kitti(lengths=[100, 200, 300, 400, 500])
+            if kitti['t_rel'] is not None and not np.isnan(kitti['t_rel']):
+                print(f"  Translation Error: {kitti['t_rel']:.4f} %")
+                print(f"  Rotation Error: {kitti['r_rel']:.4f} deg/100m")
+                print(f"  Segments evaluated: {kitti['num_segments']}")
+            else:
+                print("  Insufficient trajectory length for KITTI metrics")
+                kitti = None
+        else:
+            print(f"\n(Skipping KITTI metrics - trajectory too short: {gt_dist:.1f}m < 100m)")
+            kitti = None
+
+        print(f"{'='*70}")
+
+        # Plot if requested
+        if plot:
+            plot_trajectory_comparison(
+                evaluator.traj_est,  # TF (estimated)
+                evaluator.traj_ref,  # GT (reference)
+                title="GT vs TF Odometry Comparison",
+                aligned=align,
+                show_plot=True,
+                save_path=save_plot_path
+            )
+
+        # Return results dict
+        results = {
+            'num_poses': len(timestamps),
+            'duration_s': duration,
+            'gt_distance_m': gt_dist,
+            'tf_distance_m': tf_dist,
+            'ate_translation': {
+                'rmse': ate_trans.rmse,
+                'mean': ate_trans.mean,
+                'std': ate_trans.std,
+                'max': ate_trans.max,
+            },
+            'ate_rotation_deg': {
+                'rmse': ate_rot_stats.rmse,
+                'mean': ate_rot_stats.mean,
+                'std': ate_rot_stats.std,
+                'max': ate_rot_stats.max,
+            },
+        }
+
+        if rpe_trans is not None:
+            results['rpe_translation'] = {
+                'rmse': rpe_trans.rmse,
+                'mean': rpe_trans.mean,
+                'std': rpe_trans.std,
+                'delta': rpe_delta,
+                'delta_unit': rpe_delta_unit,
+            }
+
+        if kitti is not None:
+            results['kitti'] = kitti
+
+        return results
 
     def save_ply(self, output_path):
         """Save point cloud to PLY file"""
@@ -1402,6 +1621,16 @@ def main():
     parser.add_argument('--analyze-roughness', action='store_true',
                        help='Analyze roughness distribution to help select threshold')
 
+    # Odometry drift evaluation arguments (automatically runs when --gt-odom-topic is provided)
+    parser.add_argument('--rpe-delta', type=float, default=1.0,
+                       help='Delta interval for RPE computation (default: 1.0)')
+    parser.add_argument('--rpe-delta-unit', type=str, default='seconds',
+                       choices=['seconds', 'meters', 'frames'],
+                       help='Unit for RPE delta (default: seconds)')
+    parser.add_argument('--no-align', action='store_true',
+                       help='Disable trajectory alignment for ATE computation')
+    parser.add_argument('--plot-odom', action='store_true',
+                       help='Plot GT vs TF trajectory comparison')
 
     args = parser.parse_args()
 
@@ -1450,6 +1679,14 @@ def main():
             roughness_radius=args.roughness_radius,
             plot=args.plot_error
         )
+
+    # Evaluate odometry drift (GT vs TF) - always run if GT odom topic was provided
+    reconstructor.evaluate_odometry_drift(
+        rpe_delta=args.rpe_delta,
+        rpe_delta_unit=args.rpe_delta_unit,
+        align=not args.no_align,
+        plot=args.plot_odom
+    )
 
     # Visualize if requested
     if args.visualize in ['3d', 'both']:
