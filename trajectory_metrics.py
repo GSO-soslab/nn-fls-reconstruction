@@ -362,6 +362,189 @@ def quaternion_multiply(q1: np.ndarray, q2: np.ndarray) -> np.ndarray:
 
 
 # =============================================================================
+# Coordinate Frame Conversions
+# =============================================================================
+
+def ned_to_enu_position(pos_ned: np.ndarray) -> np.ndarray:
+    """
+    Convert position from NED to ENU frame.
+
+    NED: X=North, Y=East, Z=Down
+    ENU: X=East, Y=North, Z=Up
+
+    Args:
+        pos_ned: Position(s) in NED frame, shape (3,) or (N, 3)
+
+    Returns:
+        Position(s) in ENU frame
+    """
+    if pos_ned.ndim == 1:
+        return np.array([pos_ned[1], pos_ned[0], -pos_ned[2]])
+    else:
+        return np.column_stack([pos_ned[:, 1], pos_ned[:, 0], -pos_ned[:, 2]])
+
+
+def enu_to_ned_position(pos_enu: np.ndarray) -> np.ndarray:
+    """
+    Convert position from ENU to NED frame.
+
+    ENU: X=East, Y=North, Z=Up
+    NED: X=North, Y=East, Z=Down
+
+    Args:
+        pos_enu: Position(s) in ENU frame, shape (3,) or (N, 3)
+
+    Returns:
+        Position(s) in NED frame
+    """
+    if pos_enu.ndim == 1:
+        return np.array([pos_enu[1], pos_enu[0], -pos_enu[2]])
+    else:
+        return np.column_stack([pos_enu[:, 1], pos_enu[:, 0], -pos_enu[:, 2]])
+
+
+def ned_to_enu_quaternion(q_ned: np.ndarray) -> np.ndarray:
+    """
+    Convert quaternion from NED to ENU frame.
+
+    The rotation matrix R_ned_to_enu swaps X<->Y and negates Z:
+        [0  1  0]
+        [1  0  0]
+        [0  0 -1]
+
+    Args:
+        q_ned: Quaternion(s) in NED frame [qx, qy, qz, qw], shape (4,) or (N, 4)
+
+    Returns:
+        Quaternion(s) in ENU frame
+    """
+    # Rotation from NED to ENU as quaternion
+    # R = [[0,1,0],[1,0,0],[0,0,-1]] -> q = [0, 0, sqrt(2)/2, sqrt(2)/2] (90° around Z then flip)
+    # Actually: swap X<->Y is 90° rotation around Z, then negate Z is 180° around X or Y
+    # Simpler: just swap qx<->qy and negate qz
+    if q_ned.ndim == 1:
+        return np.array([q_ned[1], q_ned[0], -q_ned[2], q_ned[3]])
+    else:
+        return np.column_stack([q_ned[:, 1], q_ned[:, 0], -q_ned[:, 2], q_ned[:, 3]])
+
+
+def enu_to_ned_quaternion(q_enu: np.ndarray) -> np.ndarray:
+    """
+    Convert quaternion from ENU to NED frame.
+
+    Args:
+        q_enu: Quaternion(s) in ENU frame [qx, qy, qz, qw], shape (4,) or (N, 4)
+
+    Returns:
+        Quaternion(s) in NED frame
+    """
+    # Same operation - it's symmetric
+    if q_enu.ndim == 1:
+        return np.array([q_enu[1], q_enu[0], -q_enu[2], q_enu[3]])
+    else:
+        return np.column_stack([q_enu[:, 1], q_enu[:, 0], -q_enu[:, 2], q_enu[:, 3]])
+
+
+def convert_trajectory_ned_to_enu(traj: Trajectory) -> Trajectory:
+    """
+    Convert a trajectory from NED to ENU frame.
+
+    Args:
+        traj: Trajectory in NED frame
+
+    Returns:
+        Trajectory in ENU frame
+    """
+    return Trajectory(
+        timestamps=traj.timestamps.copy(),
+        positions=ned_to_enu_position(traj.positions),
+        orientations=ned_to_enu_quaternion(traj.orientations)
+    )
+
+
+def convert_trajectory_enu_to_ned(traj: Trajectory) -> Trajectory:
+    """
+    Convert a trajectory from ENU to NED frame.
+
+    Args:
+        traj: Trajectory in ENU frame
+
+    Returns:
+        Trajectory in NED frame
+    """
+    return Trajectory(
+        timestamps=traj.timestamps.copy(),
+        positions=enu_to_ned_position(traj.positions),
+        orientations=enu_to_ned_quaternion(traj.orientations)
+    )
+
+
+def ned_to_flu_position(pos_ned: np.ndarray) -> np.ndarray:
+    """
+    Convert position from NED to FLU (Front-Left-Up) frame.
+
+    NED: X=North, Y=East, Z=Down
+    FLU: X=Forward(North), Y=Left(-East), Z=Up(-Down)
+
+    Transform: x_flu = x_ned, y_flu = -y_ned, z_flu = -z_ned
+
+    Args:
+        pos_ned: Position(s) in NED frame, shape (3,) or (N, 3)
+
+    Returns:
+        Position(s) in FLU frame
+    """
+    if pos_ned.ndim == 1:
+        return np.array([pos_ned[0], -pos_ned[1], -pos_ned[2]])
+    else:
+        return np.column_stack([pos_ned[:, 0], -pos_ned[:, 1], -pos_ned[:, 2]])
+
+
+def ned_to_flu_quaternion(q_ned: np.ndarray) -> np.ndarray:
+    """
+    Convert quaternion from NED to FLU frame.
+
+    The rotation matrix R_ned_to_flu is:
+        [1  0  0]
+        [0 -1  0]
+        [0  0 -1]
+
+    This is a 180° rotation around the X-axis.
+
+    Args:
+        q_ned: Quaternion(s) in NED frame [qx, qy, qz, qw], shape (4,) or (N, 4)
+
+    Returns:
+        Quaternion(s) in FLU frame
+    """
+    # R_ned_to_flu is 180° rotation around X-axis
+    # As quaternion: q_rot = [1, 0, 0, 0] (180° around X)
+    # q_flu = q_rot * q_ned * q_rot^{-1}
+    # For 180° around X: qx stays, qy negates, qz negates, qw stays
+    if q_ned.ndim == 1:
+        return np.array([q_ned[0], -q_ned[1], -q_ned[2], q_ned[3]])
+    else:
+        return np.column_stack([q_ned[:, 0], -q_ned[:, 1], -q_ned[:, 2], q_ned[:, 3]])
+
+
+def convert_trajectory_ned_to_flu(traj: Trajectory) -> Trajectory:
+    """
+    Convert a trajectory from NED to FLU (Front-Left-Up) frame.
+
+    Args:
+        traj: Trajectory in NED frame
+
+    Returns:
+        Trajectory in FLU frame
+    """
+    return Trajectory(
+        timestamps=traj.timestamps.copy(),
+        positions=ned_to_flu_position(traj.positions),
+        orientations=ned_to_flu_quaternion(traj.orientations)
+    )
+
+
+# =============================================================================
 # Trajectory Association
 # =============================================================================
 
@@ -751,10 +934,22 @@ def plot_trajectory_comparison(
     title: str = "Trajectory Comparison",
     aligned: bool = False,
     show_plot: bool = True,
-    save_path: Optional[str] = None
+    save_path: Optional[str] = None,
+    metrics: Optional[Dict] = None
 ):
     """
     Plot estimated vs reference trajectories in 2D (top-down XY view).
+
+    Args:
+        traj_est: Estimated trajectory
+        traj_ref: Reference (ground truth) trajectory
+        title: Plot title
+        aligned: Whether trajectories were aligned
+        show_plot: Whether to display the plot
+        save_path: Path to save the plot image
+        metrics: Optional dict with evaluation metrics to display on plot.
+                 Expected keys: 'ate_translation', 'ate_rotation_deg', 'rpe_translation',
+                 'duration_s', 'gt_distance_m', 'kitti'
     """
     try:
         import matplotlib.pyplot as plt
@@ -762,7 +957,7 @@ def plot_trajectory_comparison(
         warnings.warn("matplotlib not available, skipping plot")
         return
 
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(12, 8))
 
     ax.plot(traj_ref.positions[:, 0], traj_ref.positions[:, 1],
             'b-', linewidth=2, label='Ground Truth')
@@ -778,9 +973,18 @@ def plot_trajectory_comparison(
     ax.set_xlabel('X (m)')
     ax.set_ylabel('Y (m)')
     ax.set_title(title)
-    ax.legend()
+    ax.legend(loc='upper left')
     ax.axis('equal')
     ax.grid(True, alpha=0.3)
+
+    # Add metrics text box if provided
+    if metrics is not None:
+        metrics_text = _format_metrics_text(metrics, aligned)
+        # Position text box in upper right
+        props = dict(boxstyle='round,pad=0.5', facecolor='wheat', alpha=0.9)
+        ax.text(0.98, 0.98, metrics_text, transform=ax.transAxes, fontsize=9,
+                verticalalignment='top', horizontalalignment='right',
+                bbox=props, fontfamily='monospace')
 
     plt.tight_layout()
 
@@ -791,6 +995,64 @@ def plot_trajectory_comparison(
         plt.show()
     else:
         plt.close()
+
+
+def _format_metrics_text(metrics: Dict, aligned: bool) -> str:
+    """Format metrics dictionary into a display string for the plot."""
+    lines = []
+
+    # Header info
+    if 'duration_s' in metrics:
+        lines.append(f"Duration: {metrics['duration_s']:.1f} s")
+    if 'gt_distance_m' in metrics:
+        lines.append(f"Distance: {metrics['gt_distance_m']:.1f} m")
+    if 'num_poses' in metrics:
+        lines.append(f"Poses: {metrics['num_poses']}")
+
+    lines.append("")  # blank line
+
+    # ATE Translation
+    if 'ate_translation' in metrics:
+        ate_t = metrics['ate_translation']
+        lines.append(f"ATE Translation {'(aligned)' if aligned else ''}:")
+        lines.append(f"  RMSE: {ate_t['rmse']:.4f} m")
+        lines.append(f"  Mean: {ate_t['mean']:.4f} m")
+        lines.append(f"  Max:  {ate_t['max']:.4f} m")
+
+    # ATE Rotation
+    if 'ate_rotation_deg' in metrics:
+        ate_r = metrics['ate_rotation_deg']
+        lines.append(f"ATE Rotation:")
+        lines.append(f"  RMSE: {ate_r['rmse']:.2f} deg")
+        lines.append(f"  Mean: {ate_r['mean']:.2f} deg")
+
+    lines.append("")  # blank line
+
+    # RPE
+    if 'rpe_translation' in metrics:
+        rpe = metrics['rpe_translation']
+        delta_str = f"{rpe.get('delta', '?')} {rpe.get('delta_unit', '?')}"
+        lines.append(f"RPE ({delta_str}):")
+        lines.append(f"  RMSE: {rpe['rmse']:.4f} m")
+        lines.append(f"  Mean: {rpe['mean']:.4f} m")
+        # Drift rate
+        if rpe.get('delta_unit') == 'seconds' and rpe.get('delta', 0) > 0:
+            drift_rate = rpe['rmse'] / rpe['delta']
+            lines.append(f"  Drift: {drift_rate:.4f} m/s")
+        elif rpe.get('delta_unit') == 'meters' and rpe.get('delta', 0) > 0:
+            drift_pct = (rpe['rmse'] / rpe['delta']) * 100
+            lines.append(f"  Drift: {drift_pct:.2f} %")
+
+    # KITTI metrics
+    if 'kitti' in metrics and metrics['kitti'] is not None:
+        kitti = metrics['kitti']
+        if 't_rel' in kitti and not np.isnan(kitti['t_rel']):
+            lines.append("")
+            lines.append("KITTI:")
+            lines.append(f"  Trans: {kitti['t_rel']:.2f} %")
+            lines.append(f"  Rot: {kitti['r_rel']:.2f} deg/100m")
+
+    return "\n".join(lines)
 
 
 def plot_ate_over_time(
@@ -970,39 +1232,121 @@ class TrajectoryEvaluator:
 # Main (Example Usage)
 # =============================================================================
 
-if __name__ == "__main__":
-    # Example: Create synthetic trajectories for testing
-    np.random.seed(42)
+def load_trajectories_from_npz(npz_path: str) -> Tuple[Trajectory, Trajectory]:
+    """
+    Load GT and TF trajectories from NPZ file saved by reconstruct script.
 
-    n_poses = 100
-    timestamps = np.arange(n_poses) * 1e8  # 100ms intervals in nanoseconds
+    Args:
+        npz_path: Path to NPZ file
 
-    # Ground truth: circular trajectory
-    t = np.linspace(0, 2 * np.pi, n_poses)
-    radius = 10.0
-    gt_positions = np.column_stack([
-        radius * np.cos(t),
-        radius * np.sin(t),
-        np.zeros(n_poses)
-    ])
-    gt_orientations = np.tile([0, 0, 0, 1], (n_poses, 1))  # Identity rotation
+    Returns:
+        (traj_tf, traj_gt): TF (estimated) and GT (reference) trajectories
+    """
+    data = np.load(npz_path)
+    timestamps = data['timestamps']
+    gt_positions = data['gt_positions']
+    gt_orientations = data['gt_orientations']
+    tf_positions = data['tf_positions']
+    tf_orientations = data['tf_orientations']
 
-    # Estimated: noisy version with drift
-    drift = np.cumsum(np.random.randn(n_poses, 3) * 0.01, axis=0)
-    est_positions = gt_positions + drift + np.random.randn(n_poses, 3) * 0.05
-    est_orientations = gt_orientations + np.random.randn(n_poses, 4) * 0.01
-
-    # Create trajectories
     traj_gt = Trajectory(timestamps, gt_positions, gt_orientations)
-    traj_est = Trajectory(timestamps, est_positions, est_orientations)
+    traj_tf = Trajectory(timestamps, tf_positions, tf_orientations)
 
-    # Evaluate
-    evaluator = TrajectoryEvaluator(traj_est, traj_gt, timestamp_unit="nanoseconds")
+    return traj_tf, traj_gt
 
-    evaluator.compute_ate(align=True)
-    evaluator.compute_rpe(delta=10, delta_unit=DeltaUnit.FRAMES)
 
-    evaluator.print_results("Synthetic Trajectory Test")
+def main():
+    """CLI for trajectory metrics evaluation."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description='Evaluate trajectory metrics from saved NPZ file',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python trajectory_metrics.py traj.npz --plot
+  python trajectory_metrics.py traj.npz --rpe-delta 1.0 --rpe-delta-unit seconds
+  python trajectory_metrics.py traj.npz --no-align --save-plot traj_comparison.png
+        """
+    )
+    parser.add_argument('npz_file', type=str, help='Path to trajectory NPZ file')
+    parser.add_argument('--plot', action='store_true', help='Show trajectory comparison plot')
+    parser.add_argument('--save-plot', type=str, default=None, help='Save plot to file')
+    parser.add_argument('--no-align', action='store_true', help='Disable trajectory alignment')
+    parser.add_argument('--rpe-delta', type=float, default=1.0, help='RPE delta interval')
+    parser.add_argument('--rpe-delta-unit', type=str, default='seconds',
+                       choices=['seconds', 'meters', 'frames'], help='RPE delta unit')
+
+    args = parser.parse_args()
+
+    # Load trajectories
+    print(f"Loading trajectories from {args.npz_file}")
+    traj_tf, traj_gt = load_trajectories_from_npz(args.npz_file)
+    print(f"Loaded {len(traj_gt)} poses")
+
+    # Create evaluator
+    evaluator = TrajectoryEvaluator(traj_tf, traj_gt, max_time_diff=1.0,
+                                     timestamp_unit="nanoseconds")
+
+    # Compute metrics
+    align = not args.no_align
+    ate_trans = evaluator.compute_ate(PoseRelation.TRANSLATION_PART, align=align)
+    ate_rot = evaluator.compute_ate(PoseRelation.ROTATION_ANGLE_DEG, align=align)
+
+    delta_unit_map = {
+        'seconds': DeltaUnit.SECONDS,
+        'meters': DeltaUnit.METERS,
+        'frames': DeltaUnit.FRAMES
+    }
+    delta_unit = delta_unit_map[args.rpe_delta_unit]
+
+    try:
+        rpe_trans = evaluator.compute_rpe(PoseRelation.TRANSLATION_PART,
+                                          delta=args.rpe_delta, delta_unit=delta_unit)
+    except ValueError as e:
+        print(f"RPE computation failed: {e}")
+        rpe_trans = None
+
+    # Print results
+    evaluator.print_results("Trajectory Evaluation")
+
+    # Build metrics dict for plot
+    gt_dist = traj_gt.get_distances()[-1]
+    duration = (traj_gt.timestamps[-1] - traj_gt.timestamps[0]) / 1e9
+    metrics = {
+        'num_poses': len(traj_gt),
+        'duration_s': duration,
+        'gt_distance_m': gt_dist,
+        'ate_translation': {
+            'rmse': ate_trans.rmse,
+            'mean': ate_trans.mean,
+            'max': ate_trans.max,
+        },
+        'ate_rotation_deg': {
+            'rmse': ate_rot.rmse,
+            'mean': ate_rot.mean,
+        }
+    }
+    if rpe_trans:
+        metrics['rpe_translation'] = {
+            'rmse': rpe_trans.rmse,
+            'mean': rpe_trans.mean,
+            'delta': args.rpe_delta,
+            'delta_unit': args.rpe_delta_unit,
+        }
 
     # Plot
-    plot_trajectory_comparison(traj_est, traj_gt, "Test Trajectories", show_plot=True)
+    if args.plot or args.save_plot:
+        plot_trajectory_comparison(
+            evaluator.traj_est,
+            evaluator.traj_ref,
+            title="GT vs TF Trajectory Comparison",
+            aligned=align,
+            show_plot=args.plot,
+            save_path=args.save_plot,
+            metrics=metrics
+        )
+
+
+if __name__ == "__main__":
+    main()

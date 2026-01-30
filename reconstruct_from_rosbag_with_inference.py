@@ -24,7 +24,8 @@ from full_three_stage_model import FullThreeStageModelCNN
 # Import trajectory metrics for odometry evaluation
 from trajectory_metrics import (
     Trajectory, TrajectoryEvaluator, PoseRelation, DeltaUnit,
-    rotation_matrix_to_quaternion, plot_trajectory_comparison
+    rotation_matrix_to_quaternion, plot_trajectory_comparison,
+    convert_trajectory_ned_to_flu
 )
 
 
@@ -60,13 +61,14 @@ class FLSPointCloudReconstructor:
         self.mbes_points = []  # MBES points (x, y, z)
         self.tf_tree = {}  # Store TF transforms
         self.gt_odom = []  # Store ground truth odometry messages
+        self.est_odom = []  # Store estimated/filtered odometry messages
 
-        # Storage for odometry evaluation (GT vs TF comparison)
+        # Storage for odometry evaluation (GT vs Estimated comparison)
         self.odom_eval_timestamps = []  # Timestamps for each collected pose
         self.odom_eval_gt_positions = []  # GT odom positions [x, y, z]
         self.odom_eval_gt_orientations = []  # GT odom quaternions [qx, qy, qz, qw]
-        self.odom_eval_tf_positions = []  # TF odom positions [x, y, z]
-        self.odom_eval_tf_orientations = []  # TF odom quaternions [qx, qy, qz, qw]
+        self.odom_eval_est_positions = []  # Estimated odom positions [x, y, z]
+        self.odom_eval_est_orientations = []  # Estimated odom quaternions [qx, qy, qz, qw]
 
     def build_tf_tree(self, tf_messages):
         """
@@ -138,10 +140,76 @@ class FLSPointCloudReconstructor:
         self.gt_odom.sort(key=lambda x: x['timestamp'])
         print(f"Built ground truth odom list with {len(self.gt_odom)} messages")
 
+    def build_est_odom_list(self, odom_messages):
+        """
+        Build estimated/filtered odometry list from collected messages.
+        odom_messages: list of (timestamp_ns, Odometry) tuples
+        """
+        for timestamp_ns, odom_msg in odom_messages:
+            pose = odom_msg.pose.pose
+            self.est_odom.append({
+                'timestamp': timestamp_ns,
+                'position': np.array([
+                    pose.position.x,
+                    pose.position.y,
+                    pose.position.z
+                ]),
+                'orientation': np.array([
+                    pose.orientation.x,
+                    pose.orientation.y,
+                    pose.orientation.z,
+                    pose.orientation.w
+                ])
+            })
+
+        # Sort by timestamp
+        self.est_odom.sort(key=lambda x: x['timestamp'])
+        print(f"Built estimated odom list with {len(self.est_odom)} messages")
+
+    def lookup_est_odom(self, timestamp):
+        """
+        Look up estimated odometry at a given timestamp with interpolation.
+        Returns (position, orientation_quaternion).
+        """
+        if len(self.est_odom) == 0:
+            return None, None
+
+        # Find odom before and after timestamp
+        before = None
+        after = None
+
+        for i, odom in enumerate(self.est_odom):
+            if odom['timestamp'] <= timestamp:
+                before = odom
+            if odom['timestamp'] >= timestamp:
+                after = odom
+                break
+
+        if before is None and after is None:
+            return None, None
+
+        if before is None:
+            return after['position'].copy(), after['orientation'].copy()
+
+        if after is None:
+            return before['position'].copy(), before['orientation'].copy()
+
+        if before['timestamp'] == after['timestamp']:
+            return before['position'].copy(), before['orientation'].copy()
+
+        # Interpolate
+        dt = after['timestamp'] - before['timestamp']
+        alpha = (timestamp - before['timestamp']) / dt
+
+        pos = (1 - alpha) * before['position'] + alpha * after['position']
+        q_interp = self.slerp_quaternion(before['orientation'], after['orientation'], alpha)
+
+        return pos, q_interp
+
     def lookup_gt_odom(self, timestamp):
         """
         Look up ground truth odometry at a given timestamp with interpolation.
-        Returns (position, rotation_matrix) for base_link in world frame.
+        Returns (position, orientation_quaternion) for base_link in world frame.
         """
         if len(self.gt_odom) == 0:
             return None, None
@@ -162,19 +230,13 @@ class FLSPointCloudReconstructor:
             return None, None
 
         if before is None:
-            pos = after['position']
-            rot = self.quaternion_to_rotation_matrix(*after['orientation'])
-            return pos, rot
+            return after['position'].copy(), after['orientation'].copy()
 
         if after is None:
-            pos = before['position']
-            rot = self.quaternion_to_rotation_matrix(*before['orientation'])
-            return pos, rot
+            return before['position'].copy(), before['orientation'].copy()
 
         if before['timestamp'] == after['timestamp']:
-            pos = before['position']
-            rot = self.quaternion_to_rotation_matrix(*before['orientation'])
-            return pos, rot
+            return before['position'].copy(), before['orientation'].copy()
 
         # Interpolate
         dt = after['timestamp'] - before['timestamp']
@@ -182,9 +244,8 @@ class FLSPointCloudReconstructor:
 
         pos = (1 - alpha) * before['position'] + alpha * after['position']
         q_interp = self.slerp_quaternion(before['orientation'], after['orientation'], alpha)
-        rot = self.quaternion_to_rotation_matrix(*q_interp)
 
-        return pos, rot
+        return pos, q_interp
 
     def get_transform_with_gt_odom(self, from_frame, timestamp):
         """
@@ -194,10 +255,13 @@ class FLSPointCloudReconstructor:
         Returns (translation, rotation_matrix) that takes points from from_frame to world.
         """
         # Get base_link pose in world from ground truth odometry
-        base_pos, base_rot = self.lookup_gt_odom(timestamp)
+        base_pos, base_quat = self.lookup_gt_odom(timestamp)
         if base_pos is None:
             print("WARNING: Could not find ground truth odom at timestamp")
             return np.array([0.0, 0.0, 0.0]), np.eye(3)
+
+        # Convert quaternion to rotation matrix
+        base_rot = self.quaternion_to_rotation_matrix(*base_quat)
 
         # Convert GT odom from NED to FLU (ROS convention)
         R_ned_to_flu = np.array([[1,  0,  0],
@@ -565,7 +629,7 @@ class FLSPointCloudReconstructor:
 
     def process_bag(self, bag_path, fls_topic, mbes_topic, use_tf,
                     sonar_frame, mbes_frame, world_frame,
-                    use_gt_odom=False, gt_odom_topic=None):
+                    use_gt_odom=False, gt_odom_topic=None, est_odom_topic=None):
         """
         Process ROS 2 bag file (MCAP format) and extract FLS and MBES point clouds.
 
@@ -579,20 +643,24 @@ class FLSPointCloudReconstructor:
             world_frame: World frame ID (usually 'odom' or 'map')
             use_gt_odom: Whether to use ground truth odometry instead of TF for robot pose
             gt_odom_topic: Topic name for ground truth odometry (required if use_gt_odom=True)
+            est_odom_topic: Topic name for estimated/filtered odometry (for trajectory comparison)
         """
         print(f"Processing MCAP bag: {bag_path}")
         bag_path = Path(bag_path)
 
         tf_messages = []
         gt_odom_messages = []
+        est_odom_messages = []
         print("Sonar frame:", sonar_frame, "MBES frame:", mbes_frame, "World frame:", world_frame)
         if use_gt_odom and gt_odom_topic is None:
             raise ValueError("gt_odom_topic must be specified when use_gt_odom=True")
         if gt_odom_topic:
             print(f"Ground truth odometry topic: {gt_odom_topic}")
+        if est_odom_topic:
+            print(f"Estimated odometry topic: {est_odom_topic}")
 
-        # First pass: collect TF data and ground truth odometry
-        print("Collecting TF/odometry data...")
+        # First pass: collect TF data and odometry messages
+        print("Collecting TF data...")
         with open(bag_path, 'rb') as f:
             for mcap_msg in read_ros2_messages(f):
                 if mcap_msg.channel.topic in ['/tf', '/tf_static']:
@@ -601,6 +669,10 @@ class FLSPointCloudReconstructor:
                     header_stamp = mcap_msg.ros_msg.header.stamp
                     timestamp_ns = int(header_stamp.sec * 1e9 + header_stamp.nanosec)
                     gt_odom_messages.append((timestamp_ns, mcap_msg.ros_msg))
+                elif est_odom_topic and mcap_msg.channel.topic == est_odom_topic:
+                    header_stamp = mcap_msg.ros_msg.header.stamp
+                    timestamp_ns = int(header_stamp.sec * 1e9 + header_stamp.nanosec)
+                    est_odom_messages.append((timestamp_ns, mcap_msg.ros_msg))
 
         print(f"Collected {len(tf_messages)} TF messages")
         if len(tf_messages) > 0:
@@ -620,6 +692,18 @@ class FLSPointCloudReconstructor:
                     print(f"  GT Odom time span: {(last_ts - first_ts) / 1e9:.2f} seconds")
             else:
                 print("WARNING: No ground truth odometry messages found!")
+
+        if est_odom_topic:
+            print(f"Collected {len(est_odom_messages)} estimated odometry messages")
+            if len(est_odom_messages) > 0:
+                self.build_est_odom_list(est_odom_messages)
+                if len(self.est_odom) > 0:
+                    first_ts = self.est_odom[0]['timestamp']
+                    last_ts = self.est_odom[-1]['timestamp']
+                    print(f"  Est Odom timestamp range: {first_ts} to {last_ts}")
+                    print(f"  Est Odom time span: {(last_ts - first_ts) / 1e9:.2f} seconds")
+            else:
+                print("WARNING: No estimated odometry messages found!")
 
         # Second pass: process FLS and MBES messages
         print(f"Processing FLS messages from topic: {fls_topic}")
@@ -659,24 +743,73 @@ class FLSPointCloudReconstructor:
                         tf_pos, tf_rot = self.get_transform_at_time(sonar_frame, world_frame, timestamp_ns)
                         print(f"TF path pose: t={tf_pos}, R=\n{tf_rot}")
 
-                    # Always collect poses for odometry evaluation (GT vs TF comparison)
-                    # Get GT pose
-                    gt_pos, gt_rot = self.get_transform_with_gt_odom(sonar_frame, timestamp_ns)
-                    # Get TF pose
-                    tf_pos, tf_rot = self.get_transform_at_time(sonar_frame, world_frame, timestamp_ns)
+                    # Collect poses for odometry evaluation (GT vs Estimated odom)
+                    # Only collect if we have estimated odom topic
+                    if len(self.est_odom) > 0:
+                        # Get GT pose (raw NED from Stonefish)
+                        gt_pos_ned, gt_quat_ned = self.lookup_gt_odom(timestamp_ns)
+                        # Get estimated odom pose (ROS/ENU convention)
+                        est_pos, est_quat = self.lookup_est_odom(timestamp_ns)
 
-                    # Store for evaluation (both sources regardless of which is used for reconstruction)
-                    self.odom_eval_timestamps.append(timestamp_ns)
-                    self.odom_eval_gt_positions.append(gt_pos.copy())
-                    self.odom_eval_gt_orientations.append(rotation_matrix_to_quaternion(gt_rot))
-                    self.odom_eval_tf_positions.append(tf_pos.copy())
-                    self.odom_eval_tf_orientations.append(rotation_matrix_to_quaternion(tf_rot))
+                        if gt_pos_ned is not None and est_pos is not None:
+                            # Convert GT from NED to ENU (ROS convention)
+                            # Position: NED (x=N, y=E, z=D) -> ENU (x=E, y=N, z=U)
+                            gt_pos_enu = np.array([gt_pos_ned[1], gt_pos_ned[0], -gt_pos_ned[2]])
+
+                            # Quaternion: NED to ENU
+                            # NED: X=North, Y=East, Z=Down, yaw=0 is North
+                            # ENU: X=East, Y=North, Z=Up, yaw=0 is East, yaw=90 is North
+                            # Empirically determined: swap x/y, negate x, y and z
+                            qx, qy, qz, qw = gt_quat_ned
+                            q_swapped = np.array([qy, qx, -qz, qw])
+                            # Multiply by 90° rotation about Z: q_z90 = [0, 0, sin(45°), cos(45°)]
+                            # q_result = q_z90 * q_swapped
+                            s2 = np.sqrt(2) / 2  # sin(45°) = cos(45°)
+                            ax, ay, az, aw = 0, 0, s2, s2  # q_z90
+                            bx, by, bz, bw = q_swapped
+                            gt_quat_enu = np.array([
+                                aw*bx + ax*bw + ay*bz - az*by,
+                                aw*by - ax*bz + ay*bw + az*bx,
+                                aw*bz + ax*by - ay*bx + az*bw,
+                                aw*bw - ax*bx - ay*by - az*bz
+                            ])
+
+                            # Debug: print first odom comparison
+                            if len(self.odom_eval_timestamps) == 0:
+                                print(f"\n=== First Odom Point Debug ===")
+                                # Convert quaternions to euler for easier comparison
+                                def quat_to_euler(q):
+                                    x, y, z, w = q
+                                    sinr_cosp = 2 * (w * x + y * z)
+                                    cosr_cosp = 1 - 2 * (x * x + y * y)
+                                    roll = np.arctan2(sinr_cosp, cosr_cosp)
+                                    sinp = 2 * (w * y - z * x)
+                                    pitch = np.arcsin(np.clip(sinp, -1, 1))
+                                    siny_cosp = 2 * (w * z + x * y)
+                                    cosy_cosp = 1 - 2 * (y * y + z * z)
+                                    yaw = np.arctan2(siny_cosp, cosy_cosp)
+                                    return np.degrees([roll, pitch, yaw])
+                                print(f"GT pos NED (raw): {gt_pos_ned}")
+                                print(f"GT quat NED [x,y,z,w]: {gt_quat_ned}")
+                                print(f"GT euler NED (roll,pitch,yaw) deg: {quat_to_euler(gt_quat_ned)}")
+                                print(f"GT pos ENU (converted): {gt_pos_enu}")
+                                print(f"GT quat ENU [x,y,z,w]: {gt_quat_enu}")
+                                print(f"GT euler ENU (roll,pitch,yaw) deg: {quat_to_euler(gt_quat_enu)}")
+                                print(f"Est pos (ROS/ENU): {est_pos}")
+                                print(f"Est quat [x,y,z,w] (ROS/ENU): {est_quat}")
+                                print(f"Est euler (roll,pitch,yaw) deg: {quat_to_euler(est_quat)}")
+                                print(f"===============================\n")
+                            self.odom_eval_timestamps.append(timestamp_ns)
+                            self.odom_eval_gt_positions.append(gt_pos_enu.copy())
+                            self.odom_eval_gt_orientations.append(gt_quat_enu.copy())
+                            self.odom_eval_est_positions.append(est_pos.copy())
+                            self.odom_eval_est_orientations.append(est_quat.copy())
 
                     # Reconstruct 3D points
                     self.reconstruct_points(phi_angles, position, rotation)
                     fls_count += 1
 
-                    if fls_count % 10 == 0:
+                    if fls_count % 100 == 0:
                         print(f"Processed {fls_count} FLS messages, {len(self.points)} points")
 
                 # Process MBES messages
@@ -700,7 +833,7 @@ class FLSPointCloudReconstructor:
                     self.process_laserscan(mcap_msg.ros_msg, position, rotation)
                     mbes_count += 1
 
-                    if mbes_count % 100 == 0:
+                    if mbes_count % 1000 == 0:
                         print(f"Processed {mbes_count} MBES messages, {len(self.mbes_points)} points")
 
         print(f"  Last FLS timestamp: {timestamp_ns if fls_count > 0 else 'N/A'}")
@@ -738,35 +871,36 @@ class FLSPointCloudReconstructor:
         """
         if len(self.odom_eval_timestamps) < 2:
             print("WARNING: Insufficient odometry data for evaluation.")
-            print("  Make sure to use --use-gt-odom with TF data available.")
+            print("  Make sure to provide both --gt-odom-topic and --est-odom-topic.")
             return None
 
         print(f"\n{'='*70}")
-        print("Odometry Drift Evaluation (GT vs TF)")
+        print("Odometry Drift Evaluation (GT vs Estimated)")
         print(f"{'='*70}")
         print(f"Poses collected: {len(self.odom_eval_timestamps)}")
 
         # Build Trajectory objects
+        # Both GT and Estimated odom are read directly from odom topics (same frame)
         timestamps = np.array(self.odom_eval_timestamps)
         gt_positions = np.array(self.odom_eval_gt_positions)
         gt_orientations = np.array(self.odom_eval_gt_orientations)
-        tf_positions = np.array(self.odom_eval_tf_positions)
-        tf_orientations = np.array(self.odom_eval_tf_orientations)
+        est_positions = np.array(self.odom_eval_est_positions)
+        est_orientations = np.array(self.odom_eval_est_orientations)
 
         traj_gt = Trajectory(timestamps, gt_positions, gt_orientations)
-        traj_tf = Trajectory(timestamps, tf_positions, tf_orientations)
+        traj_est = Trajectory(timestamps, est_positions, est_orientations)
 
         # Compute trajectory stats
         gt_dist = traj_gt.get_distances()[-1]
-        tf_dist = traj_tf.get_distances()[-1]
+        est_dist = traj_est.get_distances()[-1]
         duration = (timestamps[-1] - timestamps[0]) / 1e9
 
         print(f"Duration: {duration:.2f} s")
         print(f"GT trajectory length: {gt_dist:.2f} m")
-        print(f"TF trajectory length: {tf_dist:.2f} m")
+        print(f"Estimated trajectory length: {est_dist:.2f} m")
 
         # Create evaluator (timestamps already matched)
-        evaluator = TrajectoryEvaluator(traj_tf, traj_gt, max_time_diff=1.0,
+        evaluator = TrajectoryEvaluator(traj_est, traj_gt, max_time_diff=1.0,
                                          timestamp_unit="nanoseconds")
 
         # Compute ATE (translation)
@@ -825,39 +959,28 @@ class FLSPointCloudReconstructor:
             rpe_trans = None
 
         # Compute KITTI-style metrics if trajectory is long enough
-        if gt_dist >= 100:
-            print(f"\n--- KITTI-style Metrics ---")
-            kitti = evaluator.compute_kitti(lengths=[100, 200, 300, 400, 500])
-            if kitti['t_rel'] is not None and not np.isnan(kitti['t_rel']):
-                print(f"  Translation Error: {kitti['t_rel']:.4f} %")
-                print(f"  Rotation Error: {kitti['r_rel']:.4f} deg/100m")
-                print(f"  Segments evaluated: {kitti['num_segments']}")
-            else:
-                print("  Insufficient trajectory length for KITTI metrics")
-                kitti = None
-        else:
-            print(f"\n(Skipping KITTI metrics - trajectory too short: {gt_dist:.1f}m < 100m)")
-            kitti = None
+        # if gt_dist >= 100:
+        #     print(f"\n--- KITTI-style Metrics ---")
+        #     kitti = evaluator.compute_kitti(lengths=[100, 200, 300, 400, 500])
+        #     if kitti['t_rel'] is not None and not np.isnan(kitti['t_rel']):
+        #         print(f"  Translation Error: {kitti['t_rel']:.4f} %")
+        #         print(f"  Rotation Error: {kitti['r_rel']:.4f} deg/100m")
+        #         print(f"  Segments evaluated: {kitti['num_segments']}")
+        #     else:
+        #         print("  Insufficient trajectory length for KITTI metrics")
+        #         kitti = None
+        # else:
+        #     print(f"\n(Skipping KITTI metrics - trajectory too short: {gt_dist:.1f}m < 100m)")
+        #     kitti = None
 
-        print(f"{'='*70}")
+        # print(f"{'='*70}")
 
-        # Plot if requested
-        if plot:
-            plot_trajectory_comparison(
-                evaluator.traj_est,  # TF (estimated)
-                evaluator.traj_ref,  # GT (reference)
-                title="GT vs TF Odometry Comparison",
-                aligned=align,
-                show_plot=True,
-                save_path=save_plot_path
-            )
-
-        # Return results dict
+        # Build results dict
         results = {
             'num_poses': len(timestamps),
             'duration_s': duration,
             'gt_distance_m': gt_dist,
-            'tf_distance_m': tf_dist,
+            'est_distance_m': est_dist,
             'ate_translation': {
                 'rmse': ate_trans.rmse,
                 'mean': ate_trans.mean,
@@ -881,8 +1004,20 @@ class FLSPointCloudReconstructor:
                 'delta_unit': rpe_delta_unit,
             }
 
-        if kitti is not None:
-            results['kitti'] = kitti
+        # if kitti is not None:
+        #     results['kitti'] = kitti
+
+        # Plot if requested (now with metrics)
+        if plot:
+            plot_trajectory_comparison(
+                evaluator.traj_est,  # TF (estimated)
+                evaluator.traj_ref,  # GT (reference)
+                title="GT vs TF Odometry Comparison",
+                aligned=align,
+                show_plot=True,
+                save_path=save_plot_path,
+                metrics=results
+            )
 
         return results
 
@@ -1591,6 +1726,8 @@ def main():
                        help='Use ground truth odometry topic for robot pose instead of TF')
     parser.add_argument('--gt-odom-topic', type=str,
                        help='Ground truth odometry topic (required with --use-gt-odom)')
+    parser.add_argument('--est-odom-topic', type=str,
+                       help='Estimated/filtered odometry topic for trajectory comparison')
     parser.add_argument('--sonar-frame', type=str, default='mvp2_test_robot/fls_link_ros',
                        help='FLS sonar frame ID')
     parser.add_argument('--mbes-frame', type=str, default='mvp2_test_robot/mbes_link_sf',
@@ -1631,6 +1768,8 @@ def main():
                        help='Disable trajectory alignment for ATE computation')
     parser.add_argument('--plot-odom', action='store_true',
                        help='Plot GT vs TF trajectory comparison')
+    parser.add_argument('--save-odom-plot', type=str, default=None,
+                       help='Save trajectory comparison plot to PNG file (e.g., trajectory.png)')
 
     args = parser.parse_args()
 
@@ -1650,7 +1789,8 @@ def main():
         mbes_frame=args.mbes_frame,
         world_frame=args.world_frame,
         use_gt_odom=args.use_gt_odom,
-        gt_odom_topic=args.gt_odom_topic
+        gt_odom_topic=args.gt_odom_topic,
+        est_odom_topic=args.est_odom_topic
     )
 
     # Save FLS to PLY if requested
@@ -1660,6 +1800,7 @@ def main():
     # Save MBES to PLY if requested
     if args.mbes_output:
         reconstructor.save_mbes_ply(args.mbes_output)
+
 
     # Analyze roughness distribution if requested
     if args.analyze_roughness:
@@ -1685,7 +1826,8 @@ def main():
         rpe_delta=args.rpe_delta,
         rpe_delta_unit=args.rpe_delta_unit,
         align=not args.no_align,
-        plot=args.plot_odom
+        plot=args.plot_odom or args.save_odom_plot is not None,
+        save_plot_path=args.save_odom_plot
     )
 
     # Visualize if requested

@@ -692,8 +692,8 @@ class FullThreeStageModelCNN(nn.Module):
 
         # NEW: Consistent hard thresholding for both training and inference
         final_predictions = angle_preds.clone()
-        is_neg20 = (neg20_probs > 0.95)  # Use 0.5 threshold (standard for binary classification)
-        is_valid = (valid_vs_neg10_probs > 0.98)
+        is_neg20 = (neg20_probs > 0.78)  # Use 0.5 threshold (standard for binary classification)
+        is_valid = (valid_vs_neg10_probs > 0.75)
 
         # Apply decisions in order: first -20, then -10, rest are angle predictions
         final_predictions[is_neg20] = -20.0

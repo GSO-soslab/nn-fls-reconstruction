@@ -56,38 +56,45 @@ def apply_colormap(pcd, colormap='viridis', axis='z'):
     return pcd, v_min, v_max
 
 
-def show_colorbar(v_min, v_max, colormap='viridis', axis='z', title=None):
-    """
-    Display a colorbar in a separate matplotlib window.
-    """
-    fig, ax = plt.subplots(figsize=(1.5, 6))
-
-    # Create colorbar
-    norm = plt.Normalize(vmin=v_min, vmax=v_max)
-    sm = plt.cm.ScalarMappable(cmap=colormap, norm=norm)
-    sm.set_array([])
-
-    cbar = fig.colorbar(sm, cax=ax, orientation='vertical')
-    cbar.set_label(f'{axis.upper()} depth (m)', fontsize=12)
-
-    if title:
-        fig.suptitle(title, fontsize=10, y=0.98)
-
-    fig.tight_layout()
-
-    # Position window to the side (non-blocking)
-    plt.ion()
-    plt.show(block=False)
-
-    return fig
-
-
 def apply_solid_color(pcd, color):
     """Apply a solid color to all points."""
     points = np.asarray(pcd.points)
     colors = np.tile(color, (len(points), 1))
     pcd.colors = o3d.utility.Vector3dVector(colors)
     return pcd
+
+
+def save_matplotlib_figure(pcd, colormap='viridis', axis='z', output_path='output.png',
+                           elev=30, azim=45, point_size=1):
+    """
+    Save a publication-ready 3D scatter plot with colorbar using matplotlib.
+    """
+
+    points = np.asarray(pcd.points)
+    axis_map = {'x': 0, 'y': 1, 'z': 2}
+    axis_idx = axis_map.get(axis.lower(), 2)
+    values = points[:, axis_idx]
+
+    fig = plt.figure(figsize=(10, 8))
+    ax = fig.add_subplot(111, projection='3d')
+
+    scatter = ax.scatter(points[:, 0], points[:, 1], points[:, 2],
+                        c=values, cmap=colormap, s=point_size, alpha=0.8)
+
+    cbar = fig.colorbar(scatter, ax=ax, shrink=0.6, pad=0.1)
+    cbar.set_label(f'{axis.upper()} (m)', fontsize=12)
+
+    ax.set_xlabel('X (m)')
+    ax.set_ylabel('Y (m)')
+    ax.set_zlabel('Z (m)')
+    ax.view_init(elev=elev, azim=azim)
+
+    ax.set_box_aspect([1, 1, 0.5])
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    print(f"Saved figure to: {output_path}")
+    plt.close()
 
 
 def main():
@@ -106,6 +113,8 @@ def main():
                        help='Show without colormap (original colors or gray)')
     parser.add_argument('--overlay', '-o', action='store_true',
                        help='Overlay mode: use solid colors (red/blue) to distinguish point clouds')
+    parser.add_argument('--save-figure', '-s', type=str, default=None,
+                       help='Save a publication-ready matplotlib figure with colorbar (e.g., output.png)')
 
     args = parser.parse_args()
 
@@ -139,7 +148,7 @@ def main():
             else:
                 cmap = args.colormap
 
-            pcd = apply_colormap(pcd, colormap=cmap, axis=args.axis)
+            pcd, _, _ = apply_colormap(pcd, colormap=cmap, axis=args.axis)
 
         geometries.append(pcd)
 
@@ -165,6 +174,13 @@ def main():
         for i, f in enumerate(args.files):
             print(f"  {color_names[i % len(color_names)]}: {f}")
     print("="*50)
+
+    # Save matplotlib figure if requested
+    if args.save_figure:
+        pcd = geometries[0]
+        save_matplotlib_figure(pcd, colormap=args.colormap, axis=args.axis,
+                              output_path=args.save_figure, point_size=args.point_size)
+        return
 
     # Create visualizer with custom settings
     vis = o3d.visualization.Visualizer()
