@@ -15,6 +15,35 @@ def load_ply(path):
     return np.asarray(pcd.points)
 
 
+def compute_chamfer(fls_pts, mbes_pts, f_thresholds=(0.05, 0.1, 0.2)):
+    """Chamfer Distance, Hausdorff, and F-Score (full 3D, point-to-point)."""
+    fls_pcd = o3d.geometry.PointCloud()
+    fls_pcd.points = o3d.utility.Vector3dVector(fls_pts)
+    mbes_pcd = o3d.geometry.PointCloud()
+    mbes_pcd.points = o3d.utility.Vector3dVector(mbes_pts)
+
+    d_fls = np.asarray(fls_pcd.compute_point_cloud_distance(mbes_pcd))   # FLS→MBES
+    d_mbes = np.asarray(mbes_pcd.compute_point_cloud_distance(fls_pcd))  # MBES→FLS
+
+    f_scores = {}
+    for tau in f_thresholds:
+        p = float(np.mean(d_fls < tau))
+        r = float(np.mean(d_mbes < tau))
+        f_scores[tau] = {
+            'precision': p,
+            'recall': r,
+            'f': 2 * p * r / (p + r) if (p + r) > 0 else 0.0,
+        }
+
+    return {
+        'chamfer': float(np.mean(d_fls ** 2) + np.mean(d_mbes ** 2)),
+        'hausdorff': float(max(np.max(d_fls), np.max(d_mbes))),
+        'mean_fls2mbes': float(np.mean(d_fls)),
+        'mean_mbes2fls': float(np.mean(d_mbes)),
+        'f_scores': f_scores,
+    }
+
+
 def compute_error(fls_pts, mbes_pts, bin_size=0.5):
     """Roman & Singh (2006) bin-based map-to-map error."""
     fls_min = np.min(fls_pts[:, :2], axis=0)
@@ -70,7 +99,7 @@ def compute_error(fls_pts, mbes_pts, bin_size=0.5):
     }
 
 
-def plot_pair(fls_pts, mbes_pts, name, metrics, subsample=1):
+def plot_pair(fls_pts, mbes_pts, name, metrics, chamfer, subsample=1):
     """Plot FLS and MBES side by side with metrics annotation."""
     fig = plt.figure(figsize=(16, 6))
 
@@ -96,23 +125,36 @@ def plot_pair(fls_pts, mbes_pts, name, metrics, subsample=1):
         ax.set_ylim(all_pts[:, 1].min(), all_pts[:, 1].max())
         ax.set_zlim(all_pts[:, 2].min(), all_pts[:, 2].max())
 
-    # Metrics text
+    # Bin-based metrics (left)
     if metrics:
-        text = (f"Mean:   {metrics['mean']:.4f} m\n"
-                f"Median: {metrics['median']:.4f} m\n"
-                f"RMSE:   {metrics['rmse']:.4f} m\n"
-                f"Std:    {metrics['std']:.4f} m\n"
-                f"Min:    {metrics['min']:.4f} m\n"
-                f"Max:    {metrics['max']:.4f} m\n"
-                f"Bins:   {metrics['bins']}/{metrics['total_bins']} ({metrics['coverage']*100:.1f}%)")
+        bin_text = (f"── Bin-based (Z only) ──\n"
+                    f"Mean:   {metrics['mean']:.4f} m\n"
+                    f"Median: {metrics['median']:.4f} m\n"
+                    f"RMSE:   {metrics['rmse']:.4f} m\n"
+                    f"Std:    {metrics['std']:.4f} m\n"
+                    f"Bins:   {metrics['bins']}/{metrics['total_bins']} ({metrics['coverage']*100:.1f}%)")
     else:
-        text = "No overlapping region"
+        bin_text = "── Bin-based (Z only) ──\nNo overlapping region"
 
-    fig.text(0.5, 0.02, text, ha='center', va='bottom', fontsize=10, family='monospace',
+    fig.text(0.25, 0.02, bin_text, ha='center', va='bottom', fontsize=9, family='monospace',
              bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
-    fig.suptitle(f'{name}  —  Map-to-Map Error (Roman & Singh)', fontsize=14, fontweight='bold')
-    plt.tight_layout(rect=[0, 0.12, 1, 0.95])
+    # Chamfer metrics (right)
+    f_lines = ''.join(
+        f"  F@{tau:.2f}m: {v['f']:.3f}  (P={v['precision']:.2f} R={v['recall']:.2f})\n"
+        for tau, v in sorted(chamfer['f_scores'].items())
+    )
+    chamfer_text = (f"── 3D Metrics ──\n"
+                    f"Mean FLS→MBES: {chamfer['mean_fls2mbes']:.4f} m\n"
+                    f"Mean MBES→FLS: {chamfer['mean_mbes2fls']:.4f} m\n")
+                    # f"Hausdorff:     {chamfer['hausdorff']:.4f} m\n"
+                    # f"F-Score:\n{f_lines}")
+
+    fig.text(0.75, 0.02, chamfer_text, ha='center', va='bottom', fontsize=9, family='monospace',
+             bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.8))
+
+    fig.suptitle(f'{name}  —  FLS vs MBES Error', fontsize=14, fontweight='bold')
+    plt.tight_layout(rect=[0, 0.22, 1, 0.95])
     return fig
 
 
@@ -159,7 +201,12 @@ def main():
             continue
 
         metrics = compute_error(fls_pts, mbes_pts, args.bin_size)
-        fig = plot_pair(fls_pts, mbes_pts, name, metrics, args.subsample)
+        chamfer = compute_chamfer(fls_pts, mbes_pts)
+        print(f"  Chamfer:   {chamfer['chamfer']:.6f} m²  |  Hausdorff: {chamfer['hausdorff']:.4f} m")
+        print(f"  Mean FLS→MBES: {chamfer['mean_fls2mbes']:.4f} m  |  Mean MBES→FLS: {chamfer['mean_mbes2fls']:.4f} m")
+        for tau, v in sorted(chamfer['f_scores'].items()):
+            print(f"  F@{tau:.2f}m: {v['f']:.3f}  (P={v['precision']:.2f} R={v['recall']:.2f})")
+        fig = plot_pair(fls_pts, mbes_pts, name, metrics, chamfer, args.subsample)
 
         if args.save:
             out_path = os.path.join(args.save, f'{name}_comparison.png')
