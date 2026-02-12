@@ -1041,6 +1041,11 @@ class FLSPointCloudReconstructor:
 
         print(f"Saved point cloud to {output_path}")
 
+        # Also save as PCD
+        pcd_path = str(Path(output_path).with_suffix('.pcd'))
+        self._save_pcd(points, pcd_path)
+        print(f"Saved point cloud to {pcd_path}")
+
     def save_mbes_ply(self, output_path):
         """Save MBES point cloud to PLY file"""
         if len(self.mbes_points) == 0:
@@ -1062,6 +1067,28 @@ class FLSPointCloudReconstructor:
                 f.write(f"{point[0]} {point[1]} {point[2]}\n")
 
         print(f"Saved MBES point cloud to {output_path}")
+
+        # Also save as PCD
+        pcd_path = str(Path(output_path).with_suffix('.pcd'))
+        self._save_pcd(points, pcd_path)
+        print(f"Saved MBES point cloud to {pcd_path}")
+
+    def _save_pcd(self, points, output_path):
+        """Save points as ASCII PCD file"""
+        with open(output_path, 'w') as f:
+            f.write("# .PCD v0.7 - Point Cloud Data file format\n")
+            f.write("VERSION 0.7\n")
+            f.write("FIELDS x y z\n")
+            f.write("SIZE 4 4 4\n")
+            f.write("TYPE F F F\n")
+            f.write("COUNT 1 1 1\n")
+            f.write(f"WIDTH {len(points)}\n")
+            f.write("HEIGHT 1\n")
+            f.write("VIEWPOINT 0 0 0 1 0 0 0\n")
+            f.write(f"POINTS {len(points)}\n")
+            f.write("DATA ascii\n")
+            for point in points:
+                f.write(f"{point[0]} {point[1]} {point[2]}\n")
 
     def compute_roughness(self, points, radius=1.0, max_nn=50):
         """
