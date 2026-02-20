@@ -15,7 +15,7 @@ def load_ply(path):
     return np.asarray(pcd.points)
 
 
-def compute_chamfer(fls_pts, mbes_pts, f_thresholds=(0.05, 0.1, 0.2)):
+def compute_chamfer(fls_pts, mbes_pts, f_thresholds=(0.3, 0.3, 0.3)):
     """Chamfer Distance, Hausdorff, and F-Score (full 3D, point-to-point)."""
     fls_pcd = o3d.geometry.PointCloud()
     fls_pcd.points = o3d.utility.Vector3dVector(fls_pts)
@@ -35,12 +35,27 @@ def compute_chamfer(fls_pts, mbes_pts, f_thresholds=(0.05, 0.1, 0.2)):
             'f': 2 * p * r / (p + r) if (p + r) > 0 else 0.0,
         }
 
+    # Inlier stats per threshold: how many points actually fell within tau
+    inliers = {}
+    for tau in f_thresholds:
+        n_fls_in = int(np.sum(d_fls < tau))
+        n_mbes_in = int(np.sum(d_mbes < tau))
+        inliers[tau] = {
+            'fls_inliers': n_fls_in,
+            'fls_total': len(d_fls),
+            'fls_pct': 100.0 * n_fls_in / len(d_fls),
+            'mbes_inliers': n_mbes_in,
+            'mbes_total': len(d_mbes),
+            'mbes_pct': 100.0 * n_mbes_in / len(d_mbes),
+        }
+
     return {
         'chamfer': float(np.mean(d_fls ** 2) + np.mean(d_mbes ** 2)),
         'hausdorff': float(max(np.max(d_fls), np.max(d_mbes))),
         'mean_fls2mbes': float(np.mean(d_fls)),
         'mean_mbes2fls': float(np.mean(d_mbes)),
         'f_scores': f_scores,
+        'inliers': inliers,
     }
 
 
@@ -99,7 +114,7 @@ def compute_error(fls_pts, mbes_pts, bin_size=0.5):
     }
 
 
-def plot_pair(fls_pts, mbes_pts, name, metrics, chamfer, subsample=1):
+def plot_pair(fls_pts, mbes_pts, name, chamfer, subsample=1):
     """Plot FLS and MBES side by side with metrics annotation."""
     fig = plt.figure(figsize=(16, 6))
 
@@ -125,36 +140,49 @@ def plot_pair(fls_pts, mbes_pts, name, metrics, chamfer, subsample=1):
         ax.set_ylim(all_pts[:, 1].min(), all_pts[:, 1].max())
         ax.set_zlim(all_pts[:, 2].min(), all_pts[:, 2].max())
 
-    # Bin-based metrics (left)
-    if metrics:
-        bin_text = (f"── Bin-based (Z only) ──\n"
-                    f"Mean:   {metrics['mean']:.4f} m\n"
-                    f"Median: {metrics['median']:.4f} m\n"
-                    f"RMSE:   {metrics['rmse']:.4f} m\n"
-                    f"Std:    {metrics['std']:.4f} m\n"
-                    f"Bins:   {metrics['bins']}/{metrics['total_bins']} ({metrics['coverage']*100:.1f}%)")
-    else:
-        bin_text = "── Bin-based (Z only) ──\nNo overlapping region"
+    # # Bin-based metrics (left)
+    # if metrics:
+    #     bin_text = (f"── Bin-based (Z only) ──\n"
+    #                 f"Mean:   {metrics['mean']:.4f} m\n"
+    #                 f"Median: {metrics['median']:.4f} m\n"
+    #                 f"RMSE:   {metrics['rmse']:.4f} m\n"
+    #                 f"Std:    {metrics['std']:.4f} m\n"
+    #                 f"Bins:   {metrics['bins']}/{metrics['total_bins']} ({metrics['coverage']*100:.1f}%)")
+    # else:
+    #     bin_text = "── Bin-based (Z only) ──\nNo overlapping region"
 
-    fig.text(0.25, 0.02, bin_text, ha='center', va='bottom', fontsize=9, family='monospace',
-             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+    # fig.text(0.25, 0.02, bin_text, ha='center', va='bottom', fontsize=9, family='monospace',
+    #          bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
 
-    # Chamfer metrics (right)
-    f_lines = ''.join(
-        f"  F@{tau:.2f}m: {v['f']:.3f}  (P={v['precision']:.2f} R={v['recall']:.2f})\n"
-        for tau, v in sorted(chamfer['f_scores'].items())
+    # 3D metrics + inlier counts — centred below the plots
+    # inlier_lines = ''.join(
+    #     f"  τ={tau:.2f}m — FLS→MBES (noise):    {iv['fls_inliers']}/{iv['fls_total']} ({iv['fls_pct']:.1f}%)\n"
+    #     f"           MBES→FLS (coverage): {iv['mbes_inliers']}/{iv['mbes_total']} ({iv['mbes_pct']:.1f}%)\n"
+    #     for tau, iv in sorted(chamfer['inliers'].items())
+    # )
+
+    inlier_lines = ''.join(
+    f"  τ={tau:.2f}m — MBES→FLS (coverage): {iv['mbes_inliers']}/{iv['mbes_total']} ({iv['mbes_pct']:.1f}%)\n"
+    for tau, iv in sorted(chamfer['inliers'].items())
     )
-    chamfer_text = (f"── 3D Metrics ──\n"
-                    f"Mean FLS→MBES: {chamfer['mean_fls2mbes']:.4f} m\n"
-                    f"Mean MBES→FLS: {chamfer['mean_mbes2fls']:.4f} m\n")
-                    # f"Hausdorff:     {chamfer['hausdorff']:.4f} m\n"
-                    # f"F-Score:\n{f_lines}")
+    # guide = ("── Interpretation Guide ──\n"
+    #          "High FLS→MBES % → many FLS points are noise / ghosts\n"
+    #          "Low  FLS→MBES % → FLS reconstruction is clean\n"
+    #          "High MBES→FLS % → FLS covered the real surface well  ✓\n"
+    #          "Low  MBES→FLS % → FLS missed parts of the real surface ✗")
 
-    fig.text(0.75, 0.02, chamfer_text, ha='center', va='bottom', fontsize=9, family='monospace',
+    chamfer_text = (f"── 3D Metrics ──\n"
+                    f"Mean FLS→MBES (precision/noise): {chamfer['mean_fls2mbes']:.4f} m\n"
+                    f"Mean MBES→FLS (recall/coverage): {chamfer['mean_mbes2fls']:.4f} m\n"
+                    f"\n── Inliers within threshold ──\n"
+                    f"{inlier_lines}")
+                    # f"\n{guide}")
+
+    fig.text(0.5, 0.02, chamfer_text, ha='center', va='bottom', fontsize=9, family='monospace',
              bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.8))
 
     fig.suptitle(f'{name}  —  FLS vs MBES Error', fontsize=14, fontweight='bold')
-    plt.tight_layout(rect=[0, 0.22, 1, 0.95])
+    plt.tight_layout(rect=[0, 0.28, 1, 0.95])
     return fig
 
 
@@ -200,13 +228,17 @@ def main():
             print(f"  Skipping — not enough points (FLS={len(fls_pts)}, MBES={len(mbes_pts)})")
             continue
 
-        metrics = compute_error(fls_pts, mbes_pts, args.bin_size)
+        # metrics = compute_error(fls_pts, mbes_pts, args.bin_size)
         chamfer = compute_chamfer(fls_pts, mbes_pts)
         print(f"  Chamfer:   {chamfer['chamfer']:.6f} m²  |  Hausdorff: {chamfer['hausdorff']:.4f} m")
         print(f"  Mean FLS→MBES: {chamfer['mean_fls2mbes']:.4f} m  |  Mean MBES→FLS: {chamfer['mean_mbes2fls']:.4f} m")
         for tau, v in sorted(chamfer['f_scores'].items()):
             print(f"  F@{tau:.2f}m: {v['f']:.3f}  (P={v['precision']:.2f} R={v['recall']:.2f})")
-        fig = plot_pair(fls_pts, mbes_pts, name, metrics, chamfer, args.subsample)
+        print(f"  Inlier counts (points within threshold):")
+        for tau, iv in sorted(chamfer['inliers'].items()):
+            print(f"    τ={tau:.2f}m — FLS: {iv['fls_inliers']}/{iv['fls_total']} ({iv['fls_pct']:.1f}%)  "
+                  f"MBES: {iv['mbes_inliers']}/{iv['mbes_total']} ({iv['mbes_pct']:.1f}%)")
+        fig = plot_pair(fls_pts, mbes_pts, name, chamfer, args.subsample)
 
         if args.save:
             out_path = os.path.join(args.save, f'{name}_comparison.png')
