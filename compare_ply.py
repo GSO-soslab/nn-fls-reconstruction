@@ -8,6 +8,8 @@ import numpy as np
 import open3d as o3d
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from mpl_toolkits.mplot3d.art3d import Line3DCollection
+from scipy.spatial import cKDTree
 
 
 def load_ply(path):
@@ -24,6 +26,9 @@ def compute_chamfer(fls_pts, mbes_pts, f_thresholds=(0.3, 0.3, 0.3)):
 
     d_fls = np.asarray(fls_pcd.compute_point_cloud_distance(mbes_pcd))   # FLS→MBES
     d_mbes = np.asarray(mbes_pcd.compute_point_cloud_distance(fls_pcd))  # MBES→FLS
+
+    # Nearest FLS neighbour index for each MBES point (for correspondence plot)
+    d_mbes_nn, nn_idx = cKDTree(fls_pts).query(mbes_pts, workers=-1)
 
     f_scores = {}
     for tau in f_thresholds:
@@ -56,6 +61,9 @@ def compute_chamfer(fls_pts, mbes_pts, f_thresholds=(0.3, 0.3, 0.3)):
         'mean_mbes2fls': float(np.mean(d_mbes)),
         'f_scores': f_scores,
         'inliers': inliers,
+        'd_fls': d_fls,
+        'nn_idx': nn_idx,
+        'd_mbes_nn': d_mbes_nn,
     }
 
 
@@ -115,27 +123,51 @@ def compute_error(fls_pts, mbes_pts, bin_size=0.5):
 
 
 def plot_pair(fls_pts, mbes_pts, name, chamfer, subsample=1):
-    """Plot FLS and MBES side by side with metrics annotation."""
-    fig = plt.figure(figsize=(16, 6))
+    """Plot FLS, MBES, FLS coloured by error, and correspondence lines."""
+    fig = plt.figure(figsize=(28, 6))
 
     fls_sub = fls_pts[::subsample]
     mbes_sub = mbes_pts[::subsample]
+    d_fls_sub = chamfer['d_fls'][::subsample]
 
     # FLS
-    ax1 = fig.add_subplot(1, 2, 1, projection='3d')
+    ax1 = fig.add_subplot(1, 4, 1, projection='3d')
     ax1.scatter(fls_sub[:, 0], fls_sub[:, 1], fls_sub[:, 2], s=0.3, c=fls_sub[:, 2], cmap='viridis')
     ax1.set_title(f'FLS — {name}')
     ax1.set_xlabel('X'); ax1.set_ylabel('Y'); ax1.set_zlabel('Z')
 
     # MBES
-    ax2 = fig.add_subplot(1, 2, 2, projection='3d')
+    ax2 = fig.add_subplot(1, 4, 2, projection='3d')
     ax2.scatter(mbes_sub[:, 0], mbes_sub[:, 1], mbes_sub[:, 2], s=0.3, c=mbes_sub[:, 2], cmap='viridis')
     ax2.set_title(f'MBES — {name}')
     ax2.set_xlabel('X'); ax2.set_ylabel('Y'); ax2.set_zlabel('Z')
 
+    # FLS coloured by per-point distance to nearest MBES point
+    ax3 = fig.add_subplot(1, 4, 3, projection='3d')
+    sc = ax3.scatter(fls_sub[:, 0], fls_sub[:, 1], fls_sub[:, 2], s=0.3, c=d_fls_sub, cmap='hot_r')
+    ax3.set_title(f'FLS Error (dist→MBES) — {name}')
+    ax3.set_xlabel('X'); ax3.set_ylabel('Y'); ax3.set_zlabel('Z')
+    plt.colorbar(sc, ax=ax3, label='Distance (m)', shrink=0.5, pad=0.1)
+
+    # Correspondences: lines from each MBES point to its nearest FLS neighbour
+    ax4 = fig.add_subplot(1, 4, 4, projection='3d')
+    nn_idx = chamfer['nn_idx']
+    d_mbes_full = chamfer['d_mbes_nn']
+    vmax = np.percentile(d_mbes_full, 95)
+    cmap = plt.get_cmap('hot_r')
+    segments = np.stack([mbes_pts, fls_pts[nn_idx]], axis=1)  # (N, 2, 3)
+    colors = cmap(np.clip(d_mbes_full / vmax, 0.0, 1.0))
+    lc = Line3DCollection(segments, colors=colors, linewidths=0.4, alpha=0.6)
+    ax4.add_collection(lc)
+    ax4.scatter(mbes_pts[:, 0], mbes_pts[:, 1], mbes_pts[:, 2], s=0.5, c='blue', label='MBES')
+    ax4.scatter(fls_pts[nn_idx, 0], fls_pts[nn_idx, 1], fls_pts[nn_idx, 2],
+                s=0.5, c='red', label='FLS')
+    ax4.set_title(f'Correspondences MBES→FLS — {name}')
+    ax4.set_xlabel('X'); ax4.set_ylabel('Y'); ax4.set_zlabel('Z')
+
     # Match axes limits
     all_pts = np.vstack([fls_pts, mbes_pts])
-    for ax in [ax1, ax2]:
+    for ax in [ax1, ax2, ax3, ax4]:
         ax.set_xlim(all_pts[:, 0].min(), all_pts[:, 0].max())
         ax.set_ylim(all_pts[:, 1].min(), all_pts[:, 1].max())
         ax.set_zlim(all_pts[:, 2].min(), all_pts[:, 2].max())
