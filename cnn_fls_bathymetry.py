@@ -14,6 +14,19 @@ from sklearn.model_selection import train_test_split
 import csv
 
 
+# ==================== SENSOR CONFIG ====================
+N_BINS = 467          # FLS range bins (rows): was 668 with vertical_fov=20, now 467 with vertical_fov=60
+N_BEAMS_PER_BIN = 4   # max MBES points per FLS bin
+N_OUT = N_BINS * N_BEAMS_PER_BIN  # 1868: total output size (tangents or phis)
+
+# CSV column layout: [timestamp, intensity×N_BINS, tangent×N_OUT, phi×N_OUT]
+COL_INTENSITY_START = 1
+COL_INTENSITY_END   = 1 + N_BINS           # exclusive: 468
+COL_TANGENT_START   = COL_INTENSITY_END    # 468
+COL_TANGENT_END     = COL_TANGENT_START + N_OUT  # 2336
+COL_PHI_START       = COL_TANGENT_END      # 2336
+COL_PHI_END         = COL_PHI_START + N_OUT      # 4204
+
 # ==================== UTILITIES ====================
 
 def get_device():
@@ -57,24 +70,24 @@ def reshape_predictions(predictions, prediction_type):
     batch_size = predictions.size(0)
 
     if prediction_type == 'phi':
-        # Phi-only mode: [batch_size, 2672] -> phis [batch_size, 4, 668]
-        phis = torch.zeros(batch_size, 4, 668)
-        for i in range(4):
-            phis[:, i, :] = predictions[:, i::4]
+        # Phi-only mode: [batch_size, N_OUT] -> phis [batch_size, 4, N_BINS]
+        phis = torch.zeros(batch_size, N_BEAMS_PER_BIN, N_BINS)
+        for i in range(N_BEAMS_PER_BIN):
+            phis[:, i, :] = predictions[:, i::N_BEAMS_PER_BIN]
         tangents = torch.zeros_like(phis)  # No tangent predictions
 
     elif prediction_type == 'tangent':
-        # Tangent-only mode: [batch_size, 2672] -> tangents [batch_size, 4, 668]
-        tangents = torch.zeros(batch_size, 4, 668)
-        for i in range(4):
-            tangents[:, i, :] = predictions[:, i::4]
-        phis = torch.zeros_like(tangents)  # No phi predictions
+        # Tangent-only mode: [batch_size, N_OUT] -> tangents [batch_size, 4, N_BINS]
+        tangents = torch.zeros(batch_size, N_BEAMS_PER_BIN, N_BINS)
+        for i in range(N_BEAMS_PER_BIN):
+            tangents[:, i, :] = predictions[:, i::N_BEAMS_PER_BIN]
+        phis = torch.zeros_like(tangents)  # No phi prcsv_file = edictions
 
     elif prediction_type == 'combined':
-        # Combined mode: [batch_size, 5336] -> both tangents and phis
-        reshaped = predictions.view(batch_size, 668, 8)
-        tangents = reshaped[:, :, :4].transpose(1, 2)  # [batch, 4, 668]
-        phis = reshaped[:, :, 4:].transpose(1, 2)      # [batch, 4, 668]
+        # Combined mode: [batch_size, 2*N_OUT] -> both tangents and phis
+        reshaped = predictions.view(batch_size, N_BINS, 8)
+        tangents = reshaped[:, :, :4].transpose(1, 2)  # [batch, 4, N_BINS]
+        phis = reshaped[:, :, 4:].transpose(1, 2)      # [batch, 4, N_BINS]
 
     else:
         raise ValueError(f"Unknown prediction_type: {prediction_type}")
@@ -177,9 +190,9 @@ def save_predictions_to_csv(tangent_results, phi_results, original_csv_path, out
     """
     Save predictions maintaining correct structure:
     Column 1: timestamp
-    Columns 2-669: intensities (668 columns) - KEEP ORIGINAL
-    Columns 670-3341: tangents (2672 columns) - REPLACE WITH PREDICTIONS
-    Columns 3342-6013: phis (2672 columns) - REPLACE WITH PREDICTIONS
+    Columns 2-(1+N_BINS): intensities (N_BINS columns) - KEEP ORIGINAL
+    Next N_OUT cols: tangents - REPLACE WITH PREDICTIONS
+    Next N_OUT cols: phis - REPLACE WITH PREDICTIONS
     """
     # Read the original CSV data
     original_data = []
@@ -200,22 +213,22 @@ def save_predictions_to_csv(tangent_results, phi_results, original_csv_path, out
 
     for row_idx in tangent_results.keys():
         if row_idx < len(output_data) and row_idx in phi_results:
-            pred_tangents = tangent_results[row_idx]['pred_tangents']  # Shape: [4, 668]
-            pred_phis = phi_results[row_idx]['pred_phis']              # Shape: [4, 668]
+            pred_tangents = tangent_results[row_idx]['pred_tangents']  # Shape: [4, N_BINS]
+            pred_phis = phi_results[row_idx]['pred_phis']              # Shape: [4, N_BINS]
 
-            # KEEP timestamp (column 0) and intensities (columns 1-668) unchanged
+            # KEEP timestamp (column 0) and intensities unchanged
 
-            # Replace tangent columns (columns 669-3340, which is 2672 columns)
-            tangent_start = 669  # After timestamp + 668 intensities
-            tangent_flat = pred_tangents.flatten()  # Convert [4,668] to [2672]
+            # Replace tangent columns
+            tangent_start = COL_TANGENT_START
+            tangent_flat = pred_tangents.flatten()  # Convert [4, N_BINS] to [N_OUT]
 
             for i, val in enumerate(tangent_flat):
                 col_idx = tangent_start + i
                 if col_idx < len(output_data[row_idx]):
                     output_data[row_idx][col_idx] = float(val)
 
-            # Replace phi columns (columns 3341-6012, which is 2672 columns)
-            phi_start = 669 + 2672  # After timestamp + intensities + tangents
+            # Replace phi columns
+            phi_start = COL_PHI_START  # After timestamp + intensities + tangents
             phi_flat = pred_phis.flatten()  # Convert [4,668] to [2672]
 
             for i, val in enumerate(phi_flat):
@@ -453,24 +466,24 @@ def save_predictions_with_indices_to_csv(tangent_results, phi_results, test_csv_
     for i in range(len(test_data)):
         if i in tangent_results and i in phi_results:
             # Get predictions for this test sample
-            pred_tangents = tangent_results[i]['pred_tangents']  # Shape: [4, 668]
-            pred_phis = phi_results[i]['pred_phis']              # Shape: [4, 668]
+            pred_tangents = tangent_results[i]['pred_tangents']  # Shape: [4, N_BINS]
+            pred_phis = phi_results[i]['pred_phis']              # Shape: [4, N_BINS]
 
-            # The test CSV has structure: [original_index, timestamp, intensities(668), tangents(2672), phis(2672)]
-            # Keep original_index (col 0), timestamp (col 1), and intensities (cols 2-669) unchanged
+            # The test CSV has structure: [original_index, timestamp, intensities(N_BINS), tangents(N_OUT), phis(N_OUT)]
+            # Keep original_index (col 0), timestamp (col 1), and intensities unchanged
 
-            # Replace tangent columns (cols 670-3341, accounting for the extra index column)
-            tangent_start = 670  # After index + timestamp + 668 intensities
-            tangent_flat = pred_tangents.flatten()  # Convert [4,668] to [2672]
+            # Replace tangent columns (accounting for the extra index column in test CSV)
+            tangent_start = 1 + COL_TANGENT_START
+            tangent_flat = pred_tangents.flatten()  # Convert [4, N_BINS] to [N_OUT]
 
             for j, val in enumerate(tangent_flat):
                 col_idx = tangent_start + j
                 if col_idx < len(output_data[i]):
                     output_data[i][col_idx] = float(val)
 
-            # Replace phi columns (cols 3342-6013, accounting for the extra index column)
-            phi_start = 670 + 2672  # After index + timestamp + intensities + tangents
-            phi_flat = pred_phis.flatten()  # Convert [4,668] to [2672]
+            # Replace phi columns (accounting for the extra index column in test CSV)
+            phi_start = 1 + COL_PHI_START
+            phi_flat = pred_phis.flatten()  # Convert [4, N_BINS] to [N_OUT]
 
             for j, val in enumerate(phi_flat):
                 col_idx = phi_start + j
@@ -512,17 +525,17 @@ def extract_pcl_points_from_row(row_data, range_resolution, intensity_threshold,
     # Extract intensities and phis based on column positions
     if has_indices:
         # Skip first column (index) in test data
-        intensities = numeric_values[2:670]  # columns 2-669
-        phis = numeric_values[3342:6014]     # columns 3342-6013
+        intensities = numeric_values[2:2 + N_BINS]
+        phis = numeric_values[1 + COL_PHI_START:1 + COL_PHI_END]
     else:
-        intensities = numeric_values[1:669]  # columns 1-668
-        phis = numeric_values[3341:6013]     # columns 3341-6012
+        intensities = numeric_values[COL_INTENSITY_START:COL_INTENSITY_END]
+        phis = numeric_values[COL_PHI_START:COL_PHI_END]
 
     x_points = []
     z_points = []
 
-    for point_idx in range(668):
-        reverse_idx = 667 - point_idx
+    for point_idx in range(N_BINS):
+        reverse_idx = N_BINS - 1 - point_idx
 
         # Check if we have valid intensity data
         if point_idx < len(intensities):
@@ -535,7 +548,7 @@ def extract_pcl_points_from_row(row_data, range_resolution, intensity_threshold,
         # Range calculation using the full range span
         max_range = 40.0
         min_range = 0.5
-        range_val = min_range + (reverse_idx / 668) * (max_range - min_range)
+        range_val = min_range + (reverse_idx / N_BINS) * (max_range - min_range)
 
         phi_start_idx = point_idx * 4
 
@@ -628,12 +641,12 @@ class IntensityToBathymetryUNet1D(nn.Module):
 
     def forward(self, x):
         batch_size = x.size(0)
-        x = x.view(batch_size, 1, 668)
+        x = x.view(batch_size, 1, N_BINS)
 
         # Encoder with skip connections
-        e1 = self.enc1(x)      # [B, 64, 668]
-        e2 = self.enc2(e1)     # [B, 128, 334]
-        e3 = self.enc3(e2)     # [B, 256, 167]
+        e1 = self.enc1(x)      # [B, 64, N_BINS]
+        e2 = self.enc2(e1)     # [B, 128, N_BINS//2]
+        e3 = self.enc3(e2)     # [B, 256, N_BINS//4]
 
         # Bottleneck
         b = e3
@@ -641,17 +654,17 @@ class IntensityToBathymetryUNet1D(nn.Module):
             b = block(b)
 
         # Decoder with skip connections
-        d1 = self.dec1(b)                    # [B, 128, 334]
-        d1 = torch.cat([d1, e2], dim=1)      # [B, 256, 334]
+        d1 = self.dec1(b)                    # [B, 128, N_BINS//2]
+        d1 = torch.cat([d1, e2], dim=1)      # [B, 256, N_BINS//2]
 
-        d2 = self.dec2(d1)                   # [B, 64, 668]
-        d2 = torch.cat([d2, e1], dim=1)      # [B, 128, 668]
+        d2 = self.dec2(d1)                   # [B, 64, N_BINS]
+        d2 = torch.cat([d2, e1], dim=1)      # [B, 128, N_BINS]
 
         # Final features
-        features = self.final_upsample(d2)   # [B, 32, 2672]
+        features = self.final_upsample(d2)   # [B, 32, N_OUT]
 
-        class_logits = self.classifier(features)  # [B, 3, 2672]
-        angle_pred = self.regressor(features)     # [B, 1, 2672] or [B, 2, 2672]
+        class_logits = self.classifier(features)  # [B, 3, N_OUT]
+        angle_pred = self.regressor(features)     # [B, 1, N_OUT] or [B, 2, N_OUT]
 
         return class_logits, angle_pred.squeeze(1) if angle_pred.size(1) == 1 else angle_pred
 
@@ -669,31 +682,31 @@ class BathymetryDataset(Dataset):
         row = self.data.iloc[idx]
 
         # Extract intensities (always the same)
-        intensities = torch.tensor(row.iloc[1:669].values, dtype=torch.float32)
+        intensities = torch.tensor(row.iloc[COL_INTENSITY_START:COL_INTENSITY_END].values, dtype=torch.float32)
         intensities_processed, _ = create_valid_mask(intensities)
 
         # Extract target data based on prediction type
         if self.prediction_type == 'phi':
-            target_data = torch.tensor(row.iloc[3341:6013].values, dtype=torch.float32)
+            target_data = torch.tensor(row.iloc[COL_PHI_START:COL_PHI_END].values, dtype=torch.float32)
         elif self.prediction_type == 'tangent':
-            target_data = torch.tensor(row.iloc[669:3341].values, dtype=torch.float32)
+            target_data = torch.tensor(row.iloc[COL_TANGENT_START:COL_TANGENT_END].values, dtype=torch.float32)
         elif self.prediction_type == 'combined':
-            tangents = torch.tensor(row.iloc[669:3341].values, dtype=torch.float32)
-            phis = torch.tensor(row.iloc[3341:6013].values, dtype=torch.float32)
+            tangents = torch.tensor(row.iloc[COL_TANGENT_START:COL_TANGENT_END].values, dtype=torch.float32)
+            phis = torch.tensor(row.iloc[COL_PHI_START:COL_PHI_END].values, dtype=torch.float32)
             # Combine tangents and phis for combined training
             tangents_processed, _ = create_valid_mask(tangents)
             phis_processed, _ = create_valid_mask(phis)
             target_data = torch.stack([
-                tangents_processed.view(4, 668),
-                phis_processed.view(4, 668)
-            ], dim=0).view(8, 668).transpose(0, 1).contiguous().view(-1)
+                tangents_processed.view(N_BEAMS_PER_BIN, N_BINS),
+                phis_processed.view(N_BEAMS_PER_BIN, N_BINS)
+            ], dim=0).view(8, N_BINS).transpose(0, 1).contiguous().view(-1)
         else:
             raise ValueError(f"Unknown prediction_type: {self.prediction_type}")
 
         # Process target data for non-combined types
         if self.prediction_type != 'combined':
             target_processed, _ = create_valid_mask(target_data)
-            ground_truth = target_processed.view(4, 668).contiguous().view(-1)
+            ground_truth = target_processed.view(N_BEAMS_PER_BIN, N_BINS).contiguous().view(-1)
         else:
             ground_truth = target_data
 
@@ -744,7 +757,7 @@ class SequenceBathymetryLoss(nn.Module):
         # print("Classs Label shape",class_labels.shape)
 
         # Classification loss for all positions
-        class_logits = class_logits.permute(0, 2, 1)  # [B, 2672, 3]
+        class_logits = class_logits.permute(0, 2, 1)  # [B, N_OUT, 3]
         class_loss = F.cross_entropy(
             class_logits.reshape(-1, 3),
             class_labels.reshape(-1)
@@ -872,7 +885,7 @@ def predict_with_model(model, intensities, device):
 
     prediction = angle_preds.clone()
 
-    class_preds_np = class_preds[0].numpy()  # shape: [2672]
+    class_preds_np = class_preds[0].numpy()  # shape: [N_OUT]
     df = pd.DataFrame(class_preds_np, columns=['class_prediction'])
     df.to_csv("class_predictions_after_argmax.csv", index=False)
 
@@ -902,19 +915,19 @@ def test_specific_rows(model, dataset, num_test_rows, output_dir, prediction_typ
             prediction = prediction.squeeze(0)
 
             # Get predicted classes
-            class_preds = torch.argmax(class_logits, dim=1).squeeze(0)  # [2672]
+            class_preds = torch.argmax(class_logits, dim=1).squeeze(0)  # [N_OUT]
 
             # Create ground truth classes
             gt_classes = torch.zeros_like(ground_truth_raw, dtype=torch.long)
             gt_classes[ground_truth_raw == -10.0] = 1
             gt_classes[ground_truth_raw == -20.0] = 2
 
-            # Reshape classes for each beam (4 beams)
-            pred_classes_reshaped = torch.zeros(4, 668)
-            gt_classes_reshaped = torch.zeros(4, 668)
-            for j in range(4):
-                pred_classes_reshaped[j, :] = class_preds[j::4]
-                gt_classes_reshaped[j, :] = gt_classes[j::4]
+            # Reshape classes for each beam (N_BEAMS_PER_BIN beams)
+            pred_classes_reshaped = torch.zeros(N_BEAMS_PER_BIN, N_BINS)
+            gt_classes_reshaped = torch.zeros(N_BEAMS_PER_BIN, N_BINS)
+            for j in range(N_BEAMS_PER_BIN):
+                pred_classes_reshaped[j, :] = class_preds[j::N_BEAMS_PER_BIN]
+                gt_classes_reshaped[j, :] = gt_classes[j::N_BEAMS_PER_BIN]
 
             # Evaluate
             row_metrics = evaluate_single_row(prediction, ground_truth_raw)
@@ -938,16 +951,16 @@ def test_specific_rows(model, dataset, num_test_rows, output_dir, prediction_typ
                 'gt_tangents': gt_tangents.numpy(),
                 'gt_phis': gt_phis.numpy(),
                 'classes_phi': class_logits.numpy(),
-                'pred_classes_phi': pred_classes_reshaped.numpy() if prediction_type == 'phi' else torch.zeros(4, 668).numpy(),
-                'gt_classes_phi': gt_classes_reshaped.numpy() if prediction_type == 'phi' else torch.zeros(4, 668).numpy(),
-                'pred_classes_tangent': pred_classes_reshaped.numpy() if prediction_type == 'tangent' else torch.zeros(4, 668).numpy(),
-                'gt_classes_tangent': gt_classes_reshaped.numpy() if prediction_type == 'tangent' else torch.zeros(4, 668).numpy(),
+                'pred_classes_phi': pred_classes_reshaped.numpy() if prediction_type == 'phi' else torch.zeros(N_BEAMS_PER_BIN, N_BINS).numpy(),
+                'gt_classes_phi': gt_classes_reshaped.numpy() if prediction_type == 'phi' else torch.zeros(N_BEAMS_PER_BIN, N_BINS).numpy(),
+                'pred_classes_tangent': pred_classes_reshaped.numpy() if prediction_type == 'tangent' else torch.zeros(N_BEAMS_PER_BIN, N_BINS).numpy(),
+                'gt_classes_tangent': gt_classes_reshaped.numpy() if prediction_type == 'tangent' else torch.zeros(N_BEAMS_PER_BIN, N_BINS).numpy(),
                 'metrics': row_metrics,
                 'prediction_type': prediction_type
             }
 
             # Save CSV
-            data = {'pixel_idx': range(668), 'intensities': intensities.numpy()}
+            data = {'pixel_idx': range(N_BINS), 'intensities': intensities.numpy()}
             for j in range(4):
                 if prediction_type in ['phi', 'combined']:
                     data[f'pred_phi_{j}'] = pred_phis.numpy()[j]
@@ -979,27 +992,27 @@ def visualize_predictions(results, terrain_data=None, show_plots=True):
 
         for j in range(4):
             # Tangents (disabled but structure preserved)
-            axes[0, j].scatter(range(668), pred_tangents[j], s=9, alpha=0.7, label='pred')
-            axes[0, j].scatter(range(668), gt_tangents[j], s=2, marker='x', alpha=0.7, label='gt')
+            axes[0, j].scatter(range(N_BINS), pred_tangents[j], s=9, alpha=0.7, label='pred')
+            axes[0, j].scatter(range(N_BINS), gt_tangents[j], s=2, marker='x', alpha=0.7, label='gt')
             axes[0, j].set_title(f"Tangent {j+1}")
             if j == 0: axes[0, j].legend()
 
             # Phis
-            axes[1, j].scatter(range(668), pred_phis[j], s=9, alpha=0.7, label='pred')
-            axes[1, j].scatter(range(668), gt_phis[j], s=2, marker='x', alpha=0.7, label='gt')
+            axes[1, j].scatter(range(N_BINS), pred_phis[j], s=9, alpha=0.7, label='pred')
+            axes[1, j].scatter(range(N_BINS), gt_phis[j], s=2, marker='x', alpha=0.7, label='gt')
             axes[1, j].set_title(f"Phi {j+1}")
             if j == 0: axes[1, j].legend()
 
             # Row 2: Classes comparison
-            axes[2, j].scatter(range(668), result['pred_classes_phi'][j], s=9, alpha=0.7, label='pred class', color='red')
-            axes[2, j].scatter(range(668), result['gt_classes_phi'][j], s=2, marker='x', alpha=0.7, label='gt class', color='blue')
+            axes[2, j].scatter(range(N_BINS), result['pred_classes_phi'][j], s=9, alpha=0.7, label='pred class', color='red')
+            axes[2, j].scatter(range(N_BINS), result['gt_classes_phi'][j], s=2, marker='x', alpha=0.7, label='gt class', color='blue')
             axes[2, j].set_title(f"Classes Phi {j+1}")
             axes[2, j].set_ylim(-0.5, 2.5)
             axes[2, j].set_yticks([0, 1, 2])
             if j == 0: axes[2, j].legend()
 
-            axes[3, j].scatter(range(668), result['pred_classes_tangent'][j], s=9, alpha=0.7, label='pred class', color='red')
-            axes[3, j].scatter(range(668), result['gt_classes_tangent'][j], s=2, marker='x', alpha=0.7, label='gt class', color='blue')
+            axes[3, j].scatter(range(N_BINS), result['pred_classes_tangent'][j], s=9, alpha=0.7, label='pred class', color='red')
+            axes[3, j].scatter(range(N_BINS), result['gt_classes_tangent'][j], s=2, marker='x', alpha=0.7, label='gt class', color='blue')
             axes[3, j].set_title(f"Classes Tangents {j+1}")
             axes[3, j].set_ylim(-0.5, 2.5)
             axes[3, j].set_yticks([0, 1, 2])
@@ -1033,9 +1046,9 @@ def main():
             print(f"  - {model_file} not found (OK)")
 
     # Setup
-    csv_file = '/Users/farhang/Downloads/fls_all_with_phi.csv'
+    # csv_file = '/Users/farhang/Downloads/fls_all_with_phi.csv'
     # csv_file = '/Users/farhang/Downloads/fls_all_with_phis_long.csv'
-
+    csv_file = '/home/farhang/fls_ws/src/fls_reconstruction/results/test_pond/fls_all.csv'
     # Create datasets for different prediction types
     phi_dataset = BathymetryDataset(csv_file, prediction_type='phi')
     tangent_dataset = BathymetryDataset(csv_file, prediction_type='tangent')

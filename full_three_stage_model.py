@@ -126,7 +126,7 @@ def save_predictions_with_indices_to_csv(tangent_results, phi_results, test_csv_
             pred_tangents = tangent_results[i]['pred_tangents']
             pred_phis = phi_results[i]['pred_phis']
 
-            tangent_start = 670
+            tangent_start = 470
             tangent_flat = pred_tangents.flatten()
 
             for j, val in enumerate(tangent_flat):
@@ -134,7 +134,7 @@ def save_predictions_with_indices_to_csv(tangent_results, phi_results, test_csv_
                 if col_idx < len(output_data[i]):
                     output_data[i][col_idx] = float(val)
 
-            phi_start = 670 + 2672
+            phi_start = 470 + 1872
             phi_flat = pred_phis.flatten()
 
             for j, val in enumerate(phi_flat):
@@ -215,28 +215,28 @@ class BathymetryDataset(Dataset):
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
 
-        intensities = torch.tensor(row.iloc[1:669].values, dtype=torch.float32)
+        intensities = torch.tensor(row.iloc[1:469].values, dtype=torch.float32)
         intensities_processed, _ = create_valid_mask(intensities)
 
         if self.prediction_type == 'phi':
-            target_data = torch.tensor(row.iloc[3341:6013].values, dtype=torch.float32)
+            target_data = torch.tensor(row.iloc[2341:4213].values, dtype=torch.float32)
         elif self.prediction_type == 'tangent':
-            target_data = torch.tensor(row.iloc[669:3341].values, dtype=torch.float32)
+            target_data = torch.tensor(row.iloc[469:2341].values, dtype=torch.float32)
         elif self.prediction_type == 'combined':
-            tangents = torch.tensor(row.iloc[669:3341].values, dtype=torch.float32)
-            phis = torch.tensor(row.iloc[3341:6013].values, dtype=torch.float32)
+            tangents = torch.tensor(row.iloc[469:2341].values, dtype=torch.float32)
+            phis = torch.tensor(row.iloc[2341:4213].values, dtype=torch.float32)
             tangents_processed, _ = create_valid_mask(tangents)
             phis_processed, _ = create_valid_mask(phis)
             target_data = torch.stack([
-                tangents_processed.view(4, 668),
-                phis_processed.view(4, 668)
-            ], dim=0).view(8, 668).transpose(0, 1).contiguous().view(-1)
+                tangents_processed.view(4, 468),
+                phis_processed.view(4, 468)
+            ], dim=0).view(8, 468).transpose(0, 1).contiguous().view(-1)
         else:
             raise ValueError(f"Unknown prediction_type: {self.prediction_type}")
 
         if self.prediction_type != 'combined':
             target_processed, _ = create_valid_mask(target_data)
-            ground_truth = target_processed.view(4, 668).contiguous().view(-1)
+            ground_truth = target_processed.view(4, 468).contiguous().view(-1)
         else:
             ground_truth = target_data
 
@@ -258,9 +258,9 @@ class FilteredBathymetryDataset(Dataset):
             row = self.data.iloc[idx]
 
             if prediction_type == 'phi':
-                target_data = torch.tensor(row.iloc[3341:6013].values, dtype=torch.float32)
+                target_data = torch.tensor(row.iloc[2341:4213].values, dtype=torch.float32)
             else:
-                target_data = torch.tensor(row.iloc[669:3341].values, dtype=torch.float32)
+                target_data = torch.tensor(row.iloc[469:2341].values, dtype=torch.float32)
 
             target_processed, _ = create_valid_mask(target_data)
 
@@ -279,16 +279,16 @@ class FilteredBathymetryDataset(Dataset):
         actual_idx = self.valid_indices[idx]
         row = self.data.iloc[actual_idx]
 
-        intensities = torch.tensor(row.iloc[1:669].values, dtype=torch.float32)
+        intensities = torch.tensor(row.iloc[1:469].values, dtype=torch.float32)
         intensities_processed, _ = create_valid_mask(intensities)
 
         if self.prediction_type == 'phi':
-            target_data = torch.tensor(row.iloc[3341:6013].values, dtype=torch.float32)
+            target_data = torch.tensor(row.iloc[2341:4213].values, dtype=torch.float32)
         else:
-            target_data = torch.tensor(row.iloc[669:3341].values, dtype=torch.float32)
+            target_data = torch.tensor(row.iloc[469:2341].values, dtype=torch.float32)
 
         target_processed, _ = create_valid_mask(target_data)
-        ground_truth = target_processed.view(4, 668).contiguous().view(-1)
+        ground_truth = target_processed.view(4, 468).contiguous().view(-1)
 
         non_neg20_mask = (ground_truth != -20)
 
@@ -336,7 +336,7 @@ def collate_fn(batch):
 
 class RegressorCNN(nn.Module):
     """Independent CNN for regression only"""
-    def __init__(self, prediction_type='phi', dropout_rate=0.1):
+    def __init__(self, prediction_type='phi', dropout_rate=0.1, dilation_rates=(1, 2, 4, 8)):
         super().__init__()
         self.prediction_type = prediction_type
 
@@ -356,30 +356,42 @@ class RegressorCNN(nn.Module):
             nn.LeakyReLU()
         )
 
-        # Dilated bottleneck for larger receptive field
-        self.bottleneck = nn.Sequential(
-            nn.Conv1d(256, 256, 7, padding=3),
+        # ASPP-style multi-rate dilated bottleneck.
+        # Parallel branches with rates from dilation_rates, concatenated and fused.
+        # Rates (1,2,4,8) are the literature default exponential schedule — each rate
+        # doubles to guarantee gap-free receptive field coverage with no redundancy.
+        # Ref: Yu & Koltun, "Multi-Scale Context Aggregation by Dilated Convolutions",
+        #      ICLR 2016, Sec. 3.
+        #      Chen et al., "DeepLabv3+", ECCV 2018 (ASPP module).
+        self.dilation_rates = dilation_rates
+        ch_per_branch = 256 // len(dilation_rates)
+        self.bottleneck_branches = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv1d(256, ch_per_branch, 3, padding=d, dilation=d),
+                nn.InstanceNorm1d(ch_per_branch),
+                nn.LeakyReLU(inplace=True),
+                nn.Dropout(dropout_rate),
+            ) for d in dilation_rates
+        ])
+        self.bottleneck_fuse = nn.Sequential(
+            nn.Conv1d(256, 256, 1),
             nn.InstanceNorm1d(256),
             nn.LeakyReLU(inplace=True),
-            nn.Dropout(dropout_rate),
-            nn.Conv1d(256, 256, 7, padding=3),
-            nn.InstanceNorm1d(256),
-            nn.LeakyReLU(inplace=True),
-            nn.Dropout(dropout_rate),
-            nn.Conv1d(256, 256, 7, padding=3),
-            nn.InstanceNorm1d(256),
         )
 
-        # Bottleneck - increased residual blocks for better curvature learning
+        # Residual blocks with cycling dilation rates from dilation_rates.
+        # Exponentially growing receptive field with depth, O(n) parameters.
+        # Ref: Yu & Koltun, ICLR 2016 (Sec. 3: exponential dilation schedule).
+        _dilations = [dilation_rates[i % len(dilation_rates)] for i in range(8)]
         self.residual_blocks = nn.ModuleList([
             nn.Sequential(
-                nn.Conv1d(256, 256, 7, padding=3),
+                nn.Conv1d(256, 256, 3, padding=d, dilation=d),
                 nn.InstanceNorm1d(256),
                 nn.LeakyReLU(inplace=True),
                 nn.Dropout(dropout_rate),
-                nn.Conv1d(256, 256, 7, padding=3),
+                nn.Conv1d(256, 256, 3, padding=d, dilation=d),
                 nn.InstanceNorm1d(256),
-            ) for _ in range(8)
+            ) for d in _dilations
         ])
 
         self.dec1 = nn.Sequential(
@@ -415,10 +427,11 @@ class RegressorCNN(nn.Module):
 
         b = e3
         for block in self.residual_blocks:
-            b = block(b) + b  # Add residual connection
+            b = block(b) + b  # residual connection
 
-        # Apply dilated bottleneck
-        b = self.bottleneck(b) + b
+        # ASPP bottleneck: parallel dilated branches, concat, fuse, residual
+        branches = torch.cat([br(b) for br in self.bottleneck_branches], dim=1)
+        b = self.bottleneck_fuse(branches) + b
 
         d1 = self.dec1(b)
         d1 = torch.cat([d1, e2], dim=1)
@@ -468,35 +481,35 @@ class Neg20DetectorCNN(nn.Module):
     def __init__(self, dropout_rate=0.1):
         super().__init__()
 
-        # Encoder: process 668 intensities
+        # Encoder: process 668 intensities (7->5->3: wide context first, narrow when compressed)
         self.encoder = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=3, padding=1),  # [B, 32, 668]
-            nn.BatchNorm1d(32),
+            nn.Conv1d(1, 32, kernel_size=7, padding=3),  # [B, 32, 668]
+            nn.InstanceNorm1d(32),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
             nn.Conv1d(32, 64, kernel_size=5, padding=2),  # [B, 64, 668]
-            nn.BatchNorm1d(64),
+            nn.InstanceNorm1d(64),
             nn.ReLU(),
             nn.Dropout(dropout_rate),
             nn.Conv1d(64, 32, kernel_size=3, padding=1),  # [B, 32, 668]
-            nn.BatchNorm1d(32),
+            nn.InstanceNorm1d(32),
             nn.ReLU(),
         )
 
-        # Expand 668 -> 2672 (4x upsampling)
+        # Expand 468 -> 1872 (4x upsampling, 3->7: wider context as resolution grows)
         self.upsample = nn.Sequential(
-            nn.ConvTranspose1d(32, 16, kernel_size=8, stride=4, padding=2),  # [B, 16, 2672]
-            nn.BatchNorm1d(16),
+            nn.ConvTranspose1d(32, 16, kernel_size=8, stride=4, padding=2),  # [B, 16, 1872]
+            nn.InstanceNorm1d(16),
             nn.ReLU(),
-            nn.Conv1d(16, 1, kernel_size=3, padding=1),  # [B, 1, 2672]
+            nn.Conv1d(16, 1, kernel_size=7, padding=3),  # [B, 1, 1872]
         )
 
     def forward(self, intensities):
         """
         Args:
-            intensities: [B, 668] - raw pixel intensities
+            intensities: [B, 468] - raw pixel intensities
         Returns:
-            neg20_logits: [B, 2672] - expanded to 2672 via transposed conv
+            neg20_logits: [B, 1872] - expanded to 1872 via transposed conv
         """
         # Convert to [B, 1, 668] format for Conv1d
         x = intensities.unsqueeze(1)  # [B, 1, 668]
@@ -516,18 +529,18 @@ class ValidVsNeg10CNN(nn.Module):
         super().__init__()
 
         self.net = nn.Sequential(
-            nn.Conv1d(2, 32, kernel_size=5, padding=2),  # Input: 2 channels (intensity + range)
-            nn.BatchNorm1d(32),
+            nn.Conv1d(2, 32, kernel_size=7, padding=3),  # [B, 32, 2672] — wide context at full res
+            nn.InstanceNorm1d(32),
             nn.ReLU(),
             nn.MaxPool1d(2, 2),  # 2672 -> 1336
             nn.Dropout(dropout_rate),
-            nn.Conv1d(32, 64, kernel_size=7, padding=3),
-            nn.BatchNorm1d(64),
+            nn.Conv1d(32, 64, kernel_size=5, padding=2),  # [B, 64, 1336]
+            nn.InstanceNorm1d(64),
             nn.ReLU(),
             nn.MaxPool1d(2, 2),  # 1336 -> 668
             nn.Dropout(dropout_rate),
-            nn.Conv1d(64, 32, kernel_size=5, padding=2),
-            nn.BatchNorm1d(32),
+            nn.Conv1d(64, 32, kernel_size=3, padding=1),  # [B, 32, 668] — narrow when compressed
+            nn.InstanceNorm1d(32),
             nn.ReLU(),
         )
 
@@ -559,26 +572,80 @@ class ValidVsNeg10CNN(nn.Module):
 # LOSS FUNCTION
 # ==============================================================================
 
+class LaplacianSmoothnessLoss(nn.Module):
+    """
+    Smoothness regularization on predicted angles combining:
+      - Total Variation (1st derivative): penalizes abrupt jumps along range bins
+        and across beams. lambda_tv=0.05.
+      - Laplacian (2nd derivative): penalizes curvature discontinuities, reducing
+        errors on curves and edges. lambda_smooth=0.005.
+    Both terms respect a valid_mask to exclude sentinel values (-10, -20).
+    Ref: "Surface Normal Data Guided Depth Recovery with Graph Laplacian
+         Regularization", ACM MMAsia 2019.
+    """
+    def __init__(self, lambda_tv=0.05, lambda_smooth=0.005, num_beams=4):
+        super().__init__()
+        self.lambda_tv = lambda_tv
+        self.lambda_smooth = lambda_smooth
+        self.num_beams = num_beams
+
+    def forward(self, phi_pred, targets_full):
+        B, N = phi_pred.shape
+        range_bins = N // self.num_beams
+        phi_2d = phi_pred.view(B, self.num_beams, range_bins)
+
+        valid_mask = (targets_full != -10.0) & (targets_full != -20.0)
+        valid_2d = valid_mask.view(B, self.num_beams, range_bins)
+
+        # Total variation along range (1st derivative)
+        grad_pixel = phi_2d[:, :, 1:] - phi_2d[:, :, :-1]
+        grad_pixel_mask = valid_2d[:, :, 1:] & valid_2d[:, :, :-1]
+        tv_pixel = grad_pixel[grad_pixel_mask].abs().mean() if grad_pixel_mask.any() else phi_pred.new_tensor(0.0)
+
+        # Total variation across beams (1st derivative)
+        grad_beam = phi_2d[:, 1:, :] - phi_2d[:, :-1, :]
+        grad_beam_mask = valid_2d[:, 1:, :] & valid_2d[:, :-1, :]
+        tv_beam = grad_beam[grad_beam_mask].abs().mean() if grad_beam_mask.any() else phi_pred.new_tensor(0.0)
+
+        tv_loss = self.lambda_tv * (tv_pixel + tv_beam)
+
+        # Laplacian along range (2nd derivative)
+        lap_pixel = phi_2d[:, :, 2:] - 2 * phi_2d[:, :, 1:-1] + phi_2d[:, :, :-2]
+        lap_pixel_mask = valid_2d[:, :, 2:] & valid_2d[:, :, 1:-1] & valid_2d[:, :, :-2]
+        lap_pixel_loss = (lap_pixel[lap_pixel_mask] ** 2).mean() if lap_pixel_mask.any() else phi_pred.new_tensor(0.0)
+
+        # Laplacian across beams (2nd derivative)
+        lap_beam = phi_2d[:, 2:, :] - 2 * phi_2d[:, 1:-1, :] + phi_2d[:, :-2, :]
+        lap_beam_mask = valid_2d[:, 2:, :] & valid_2d[:, 1:-1, :] & valid_2d[:, :-2, :]
+        lap_beam_loss = (lap_beam[lap_beam_mask] ** 2).mean() if lap_beam_mask.any() else phi_pred.new_tensor(0.0)
+
+        laplacian_loss = self.lambda_smooth * (lap_pixel_loss + lap_beam_loss)
+
+        return tv_loss + laplacian_loss
+
+
 class FullThreeStageLoss(nn.Module):
-    def __init__(self, alpha_neg20=2.0, alpha_valid_neg10=5.0, beta_reg=1.0):
+    def __init__(self, alpha_neg20=2.0, alpha_valid_neg10=5.0, beta_reg=1.0, lambda_smooth=0.1):
         super().__init__()
         self.alpha_neg20 = alpha_neg20
         self.alpha_valid_neg10 = alpha_valid_neg10
         self.beta_reg = beta_reg
+        self.lambda_smooth = lambda_smooth
+        self.smoothness_loss = LaplacianSmoothnessLoss()
 
     def forward(self, final_preds, neg20_logits, valid_vs_neg10_logits, angle_preds, targets_full):
 
         # Stage 1: Binary Classification for -20 detection
         target_is_neg20 = (targets_full == -20).float()
 
-        # Use pos_weight for -20 class (it's dominant)
+        # Upweight the minority (non--20) class: ~13.5% of data
         num_neg20 = target_is_neg20.sum()
-        num_not_neg20 = (~target_is_neg20.bool()).sum()
-        pos_weight_neg20 = (num_not_neg20 / (num_neg20 + 1e-8)).clamp(min=1.0, max=5.0)
+        num_not_neg20 = (~target_is_neg20.bool()).sum().float()
+        pos_weight_neg20 = (num_neg20 / (num_not_neg20 + 1e-8)).clamp(min=1.0, max=10.0)
 
         s1_loss = F.binary_cross_entropy_with_logits(
-            neg20_logits,
-            target_is_neg20,
+            -neg20_logits,
+            1.0 - target_is_neg20,
             pos_weight=pos_weight_neg20.unsqueeze(0)
         )
 
@@ -589,7 +656,7 @@ class FullThreeStageLoss(nn.Module):
             target_is_valid = (targets_full != -10).float()
             num_valid = target_is_valid[non_neg20_mask].sum()
             num_neg10 = (1 - target_is_valid[non_neg20_mask]).sum()
-            pos_weight_valid = (num_neg10 / (num_valid + 1e-8)).clamp(min=1.0, max=5.0)
+            pos_weight_valid = (num_neg10 / (num_valid + 1e-8)).clamp(min=7.0, max=7.0)
 
             s2_loss = F.binary_cross_entropy_with_logits(
                 valid_vs_neg10_logits[non_neg20_mask],
@@ -603,15 +670,19 @@ class FullThreeStageLoss(nn.Module):
         valid_mask = (targets_full != -10) & (targets_full != -20)
 
         if valid_mask.any():
-            reg_loss = F.mse_loss(angle_preds[valid_mask], targets_full[valid_mask])
+            reg_loss = F.huber_loss(angle_preds[valid_mask], targets_full[valid_mask], delta=0.1)
         else:
             reg_loss = torch.tensor(0.0, device=targets_full.device, dtype=targets_full.dtype)
 
+        # Stage 4: Laplacian smoothness regularization on angle predictions
+        smooth_loss = self.lambda_smooth * self.smoothness_loss(angle_preds, targets_full)
+
         total_loss = (self.alpha_neg20 * s1_loss +
                       self.alpha_valid_neg10 * s2_loss +
-                      self.beta_reg * reg_loss)
+                      self.beta_reg * reg_loss +
+                      smooth_loss)
 
-        return total_loss, s1_loss, s2_loss, reg_loss
+        return total_loss, s1_loss, s2_loss, reg_loss, smooth_loss
 
 class FullThreeStageModelCNN(nn.Module):
     """
@@ -629,19 +700,19 @@ class FullThreeStageModelCNN(nn.Module):
     def forward(self, intensities_full):
         """
         Args:
-            intensities_full: [B, 668]
+            intensities_full: [B, 468]
         Returns:
-            final_predictions: [B, 2672]
-            neg20_logits: [B, 2672]
-            valid_vs_neg10_logits: [B, 2672]
-            angle_preds: [B, 2672]
+            final_predictions: [B, 1872]
+            neg20_logits: [B, 1872]
+            valid_vs_neg10_logits: [B, 1872]
+            angle_preds: [B, 1872]
         """
         batch_size = intensities_full.size(0)
         device = intensities_full.device
 
         min_range = 0.5
         max_range = 40.0
-        pixel_ranges = torch.linspace(min_range, max_range, 668, dtype=torch.float32, device=device)
+        pixel_ranges = torch.linspace(min_range, max_range, 468, dtype=torch.float32, device=device)
         beam_ranges_expanded_2672 = pixel_ranges.repeat_interleave(4)
 
         # Prepare inputs
@@ -692,8 +763,8 @@ class FullThreeStageModelCNN(nn.Module):
 
         # NEW: Consistent hard thresholding for both training and inference
         final_predictions = angle_preds.clone()
-        is_neg20 = (neg20_probs > 0.78)  # Use 0.5 threshold (standard for binary classification)
-        is_valid = (valid_vs_neg10_probs > 0.75)
+        is_neg20 = (neg20_probs > 0.5)
+        is_valid = (valid_vs_neg10_probs > 0.65)
 
         # Apply decisions in order: first -20, then -10, rest are angle predictions
         final_predictions[is_neg20] = -20.0
@@ -744,6 +815,7 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
         train_s1_loss = 0.0
         train_s2_loss = 0.0
         train_reg_loss = 0.0
+        train_smooth_loss = 0.0
         step_count = 0
 
         for batch_idx, batch in enumerate(train_loader):
@@ -755,7 +827,7 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
             final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded = model(intensities)
 
             # COMPUTE ALL LOSSES
-            loss, s1_loss, s2_loss, reg_loss = criterion(
+            loss, s1_loss, s2_loss, reg_loss, smooth_loss = criterion(
                 final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded, ground_truth
             )
 
@@ -775,10 +847,11 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
                 optimizer_stage2.step()
                 scheduler_stage2.step()
 
-            # STAGE 3: Update Regressor only
-            if torch.isfinite(reg_loss):
+            # STAGE 3: Update Regressor only (reg + smoothness — both act on angle_preds)
+            regressor_loss = reg_loss + smooth_loss
+            if torch.isfinite(regressor_loss):
                 optimizer_stage3.zero_grad()
-                reg_loss.backward()
+                regressor_loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.angle_regressor.parameters(), max_norm=1.0)
                 optimizer_stage3.step()
                 scheduler_stage3.step()
@@ -787,16 +860,18 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
             train_s1_loss += s1_loss.item()
             train_s2_loss += s2_loss.item()
             train_reg_loss += reg_loss.item()
+            train_smooth_loss += smooth_loss.item()
             step_count += 1
 
         if step_count == 0:
             print("Warning: No training steps performed this epoch.")
-            avg_train_loss = avg_s1 = avg_s2 = avg_reg = float('inf')
+            avg_train_loss = avg_s1 = avg_s2 = avg_reg = avg_smooth = float('inf')
         else:
             avg_train_loss = train_loss / step_count
             avg_s1 = train_s1_loss / step_count
             avg_s2 = train_s2_loss / step_count
             avg_reg = train_reg_loss / step_count
+            avg_smooth = train_smooth_loss / step_count
 
         # VALIDATION
         model.eval()
@@ -810,7 +885,7 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
                 ground_truth = ground_truth.to(device)
 
                 final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded = model(intensities)
-                loss, _, _, _ = criterion(
+                loss, _, _, _, _ = criterion(
                     final_preds_padded, neg20_logits_padded, valid_vs_neg10_logits_padded, angle_preds_padded, ground_truth
                 )
 
@@ -825,15 +900,15 @@ def train_full_three_stage_model(model, train_loader, val_loader, num_epochs=50)
 
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), 'best_full_three_stage_model.pth')
+            torch.save(model.state_dict(), 'best_full_three_stage_model_dilated_laplacian.pth')
 
         if epoch % 10 == 0 or epoch < 5:
             print(f"Epoch {epoch+1:3d}/{num_epochs} | "
                   f"Train: {avg_train_loss:.4f} "
-                  f"(s1:{avg_s1:.3f}, s2:{avg_s2:.3f}, reg:{avg_reg:.4f}) | "
+                  f"(s1:{avg_s1:.3f}, s2:{avg_s2:.3f}, reg:{avg_reg:.4f}, smooth:{avg_smooth:.4f}) | "
                   f"Val: {avg_val_loss:.4f} | Best: {best_val_loss:.4f}")
 
-    model.load_state_dict(torch.load('best_full_three_stage_model.pth', map_location=device))
+    model.load_state_dict(torch.load('best_full_three_stage_model_dilated_laplacian.pth', map_location=device))
     print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}\n")
     return model
 
@@ -853,8 +928,8 @@ def run_inference_for_csv(dataset, model, device):
         final_pred = final_pred_padded.squeeze(0).cpu()
 
         results[i] = {
-            'pred_phis': final_pred.view(4, 668).detach().numpy(),
-            'true_phis': ground_truth.view(4, 668).detach().numpy()
+            'pred_phis': final_pred.view(4, 468).detach().numpy(),
+            'true_phis': ground_truth.view(4, 468).detach().numpy()
         }
     return results
 
@@ -863,8 +938,8 @@ def run_inference_for_csv(dataset, model, device):
 # ==============================================================================
 
 def main():
-    csv_file = '/home/farhang/fls_ws/src/fls_reconstruction/results/test/fls_all.csv'
-
+    # csv_file = '/home/farhang/fls_ws/src/fls_reconstruction/results/test/fls_all.csv'
+    csv_file = '/home/farhang/fls_ws/src/fls_reconstruction/results/test_denoised/fls_all.csv'
     print("\n" + "="*60)
     print("FULL THREE-STAGE MODEL: NEURAL -20 + TRANSFORMER + REGRESSOR")
     print("="*60)
@@ -899,7 +974,7 @@ def main():
     # Create or load model
     model = FullThreeStageModelCNN(prediction_type='phi', dropout_rate=0.1)
 
-    model_path = 'best_full_three_stage_model.pth'
+    model_path = 'best_full_three_stage_model_dilated_laplacian.pth'
     if torch.cuda.is_available():
         device = torch.device('cuda')
     elif torch.backends.mps.is_available():
@@ -985,7 +1060,7 @@ def main():
     print("\n" + "="*60)
     print("COMPLETE!")
     print("="*60)
-    print(f"\nModel saved: best_full_three_stage_model.pth")
+    print(f"\nModel saved: best_full_three_stage_model_dilated_laplacian.pth.pth")
     print(f"Test CSV: {test_predictions_path}")
     print(f"Train CSV: {train_predictions_path}")
     print("="*60)

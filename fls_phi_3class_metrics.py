@@ -107,6 +107,21 @@ def calculate_3class_metrics(y_true, y_pred, class_names=['Valid', '(-10)', '(-2
     print(f"\nOverall Accuracy: {accuracy_score(y_true, y_pred)*100:.2f}%")
     print(f"Total samples: {len(y_true)}")
 
+    # Confusion matrix
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(n_classes)))
+    print(f"\nConfusion Matrix (rows=GT, cols=Predicted):")
+    header = f"{'':>16}" + "".join(f"{name:>16}" for name in class_names)
+    print(header)
+    for i, name in enumerate(class_names):
+        row = f"{name:>16}" + "".join(f"{cm[i,j]:>16}" for j in range(n_classes))
+        print(row)
+
+    # Class distribution
+    print(f"\nClass distribution in GT:")
+    for i, name in enumerate(class_names):
+        count = np.sum(y_true == i)
+        print(f"  {name}: {count} ({100*count/len(y_true):.1f}%)")
+
     return metrics_dict
 
 
@@ -365,7 +380,7 @@ def main():
     # Load model
     print("\nLoading model...")
     model = FullThreeStageModelCNN(prediction_type='phi', dropout_rate=0.1)
-    model_path = 'best_full_three_stage_model.pth'
+    model_path = 'best_full_three_stage_model_dilated_laplacian.pth'
 
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path, map_location=device))

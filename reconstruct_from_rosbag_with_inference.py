@@ -3,6 +3,36 @@
 Reconstruct full FLS point cloud from ROS 2 bag files using neural network inference.
 Extracts FLS images, runs inference to predict phi angles, uses TF for pose,
 and builds 3D point cloud.
+
+Example usage
+-------------
+Simulation (mvp2_test_robot) — with ground truth odometry:
+python3 reconstruct_from_rosbag_with_inference.py ~/rosbag2_2026_03_19-14_00_56/rosbag2_2026_03_19-14_00_56_0.mcap \
+    --model best_full_three_stage_model_dilated_laplacian.pth \
+    --use-gt-odom \
+    --gt-odom-topic /mvp2_test_robot/stonefish/odometry/ground_truth \
+    --est-odom-topic /mvp2_test_robot/odometry/filtered \
+    --output fls_output_dilated.ply \
+    --mbes-output mbes_output_dilated.ply \
+    --plot-odom \
+    --save-odom-plot trajectory_real.png \
+    --device cuda
+
+# Field (alpha_rise) — no ground truth, static TFs injected from URDF:
+python3 reconstruct_from_rosbag_with_inference.py \
+    /home/farhang/Documents/Alpha_bags/rosbag2_2025_10_10-18_09_27/rosbag2_2025_10_10-18_09_28/rosbag2_2025_10_10-18_09_28_0.mcap \
+    --model best_full_three_stage_model_dilated_laplacian.pth \
+    --topic /alpha_rise/fls/data/image/edge \
+    --sonar-frame alpha_rise/fls_link \
+    --world-frame alpha_rise/world \
+    --est-odom-topic /alpha_rise/odometry/filtered \
+    --urdf /home/farhang/fls_ws/src/alpha_rise_auv/alpha_rise_description/urdf/base.urdf \
+    --tf-prefix alpha_rise \
+    --output fls_output_field.ply \
+    --mbes-topic "" \
+    --fls-col 244 or fls-row \
+    --intensity-scale 0.478 \
+    --device cuda
 """
 
 import numpy as np
@@ -21,6 +51,9 @@ except ImportError:
 # Import your model
 from full_three_stage_model import FullThreeStageModelCNN
 
+from urdf_tf_injector import inject_urdf_static_tfs
+from helper_sonar_denoiser import denoise_sonar_image
+
 # Import trajectory metrics for odometry evaluation
 from trajectory_metrics import (
     Trajectory, TrajectoryEvaluator, PoseRelation, DeltaUnit,
@@ -30,12 +63,24 @@ from trajectory_metrics import (
 
 
 class FLSPointCloudReconstructor:
-    def __init__(self, model_path, max_range=40.0, min_range=0.5, num_bins=668, num_beams=4, device='cpu'):
+    def __init__(self, model_path, max_range=40.0, min_range=0.5, num_bins=468, num_beams=4, device='cpu', fls_col=None, fls_row=None, fls_col_min=None, fls_col_max=None, intensity_scale=1.0, intensity_offset=0.0, denoise=False):
         self.max_range = max_range
         self.min_range = min_range
         self.num_bins = num_bins
         self.num_beams = num_beams
         self.device = device
+        self.fls_col = fls_col  # None = use center column (default)
+        self.fls_row = fls_row  # If set, extract azimuth row instead of range column (side-looking FLS)
+        self.fls_col_min = fls_col_min  # Sidescan mode: first column (azimuth) to process
+        self.fls_col_max = fls_col_max  # Sidescan mode: last column (azimuth) to process (inclusive)
+        # Multiplicative scale applied to raw intensity values before inference.
+        # The model was trained on sim data whose intensities span ~0-122.
+        # Field hardware (e.g. Oculus mono8) outputs full 0-255 range.
+        # Set to (training_max / sensor_max), e.g. 122/255 ≈ 0.478 for Oculus field data.
+        # Default 1.0 = no scaling (correct for sim bags whose intensities already match training).
+        self.intensity_scale = intensity_scale
+        self.intensity_offset = intensity_offset
+        self.denoise = denoise
 
         # Load trained model
         print(f"Loading model from {model_path}...")
@@ -69,6 +114,10 @@ class FLSPointCloudReconstructor:
         self.odom_eval_gt_orientations = []  # GT odom quaternions [qx, qy, qz, qw]
         self.odom_eval_est_positions = []  # Estimated odom positions [x, y, z]
         self.odom_eval_est_orientations = []  # Estimated odom quaternions [qx, qy, qz, qw]
+
+        # Poses used for reconstruction (one per FLS frame, in world frame)
+        self.reconstruction_positions = []   # sensor (fls_link) origin in world frame
+        self.reconstruction_bl_positions = []  # base_link origin in world frame
 
     def build_tf_tree(self, tf_messages):
         """
@@ -263,12 +312,14 @@ class FLSPointCloudReconstructor:
         # Convert quaternion to rotation matrix
         base_rot = self.quaternion_to_rotation_matrix(*base_quat)
 
-        # Convert GT odom from NED to FLU (ROS convention)
-        R_ned_to_flu = np.array([[1,  0,  0],
-                                [0, -1,  0],
-                                [0,  0, -1]])
-        base_pos = R_ned_to_flu @ base_pos
-        base_rot = R_ned_to_flu @ base_rot @ R_ned_to_flu.T
+        # Convert GT odom from NED to ENU (ROS convention).
+        # NED: X=North, Y=East, Z=Down  →  ENU: X=East, Y=North, Z=Up
+        # Position swap: [N, E, D] → [E, N, -D]
+        R_ned_to_enu = np.array([[0, 1,  0],
+                                 [1, 0,  0],
+                                 [0, 0, -1]])
+        base_pos = R_ned_to_enu @ base_pos
+        base_rot = R_ned_to_enu @ base_rot @ R_ned_to_enu.T
         
         # Get static transform chain: sensor -> nose_tip -> base_link
         if 'fls' in from_frame:
@@ -421,74 +472,71 @@ class FLSPointCloudReconstructor:
         Get transform that takes a point from from_frame to to_frame.
         point_in_to_frame = R @ point_in_from_frame + t
 
-        Chains through intermediate frames if needed.
+        Walks the TF tree generically via BFS — no hardcoded frame names or robot topology.
+        Supports both forward (parent->child) and inverse (child->parent) edges.
         Returns (translation, rotation_matrix).
         """
-        # Try direct lookup: to_frame->from_frame gives us what we need
-        # Because TF stores parent->child, and we want from->to
-        t, R = self.lookup_single_transform(to_frame, from_frame, timestamp)
-        if t is not None:
-            return t, R
+        if from_frame == to_frame:
+            return np.array([0.0, 0.0, 0.0]), np.eye(3)
 
-        # print("Frame ID lookup failed:", from_frame, "to", to_frame, "at time", timestamp)
+        # Build adjacency from tf_tree keys (each key is "parent->child")
+        # Each edge stores a callable that returns (t, R) at the given timestamp,
+        # either forward or inverted.
+        edges = {}  # frame -> list of (neighbour, forward:bool)
+        for key in self.tf_tree:
+            if '->' not in key:
+                continue
+            parent, child = key.split('->', 1)
+            edges.setdefault(parent, []).append((child, True))
+            edges.setdefault(child, []).append((parent, False))
 
-        # Try reverse lookup and invert
-        # t, R = self.lookup_single_transform(from_frame, to_frame, timestamp)
-        # if t is not None:
-        #     R_inv = R.T
-        #     t_inv = -R_inv @ t
-        #     return t_inv, R_inv
+        # BFS from from_frame to to_frame
+        from collections import deque
+        queue = deque()
+        queue.append((from_frame, [], []))  # (current_frame, path_of_keys, path_of_forward_flags)
+        visited = {from_frame}
 
-        # Chain transforms for sensor -> world/odom
-        # TF tree has: world->odom, odom->base_link, base_link->nose_tip_link,
-        #              nose_tip_link->fls_link_sf, nose_tip_link->mbes_link_sf
-        #
-        # Each T_parent_child takes points from child to parent.
+        path_keys = None
+        path_fwds = None
+        while queue:
+            frame, keys, fwds = queue.popleft()
+            if frame == to_frame:
+                path_keys = keys
+                path_fwds = fwds
+                break
+            for neighbour, forward in edges.get(frame, []):
+                if neighbour not in visited:
+                    visited.add(neighbour)
+                    key = f"{frame}->{neighbour}" if forward else f"{neighbour}->{frame}"
+                    queue.append((neighbour, keys + [key], fwds + [forward]))
 
-        if ('fls' in from_frame or 'mbes' in from_frame) and ('odom' in to_frame or 'world' in to_frame):
-            # Full TF chain: sensor -> nose_tip -> base -> odom -> world
-            if 'fls' in from_frame:
-                sensor_child = 'mvp2_test_robot/fls_link_sf'
-            else:
-                sensor_child = 'mvp2_test_robot/mbes_link_sf'
+        if path_keys is None:
+            print(f"WARNING: Could not find transform {from_frame} -> {to_frame}")
+            return np.array([0.0, 0.0, 0.0]), np.eye(3)
 
-            # Get nose_tip->sensor
-            t1, R1 = self.lookup_single_transform('mvp2_test_robot/nose_tip_link',
-                                                   sensor_child, timestamp)
-            if t1 is None:
-                t1, R1 = np.array([0.0, 0.0, 0.0]), np.eye(3)
-
-            # Get base_link->nose_tip
-            t2, R2 = self.lookup_single_transform('mvp2_test_robot/base_link',
-                                                   'mvp2_test_robot/nose_tip_link', timestamp)
-            if t2 is None:
-                t2, R2 = np.array([0.0, 0.0, 0.0]), np.eye(3)
-
-            # Get odom->base_link
-            t3, R3 = self.lookup_single_transform('mvp2_test_robot/odom',
-                                                   'mvp2_test_robot/base_link', timestamp)
-            if t3 is None:
-                print("WARNING: odom->base transform not found")
+        # Chain transforms along the path.
+        # ROS TF convention: stored parent->child with (t, R) means p_parent = R @ p_child + t.
+        # get_transform_at_time(from, to) builds p_to = R_combined @ p_from + t_combined.
+        # - BFS forward edge (stored parent->child, traversed parent->child):
+        #     we need child-from-parent, i.e. invert: R.T, -R.T @ t
+        # - BFS backward edge (stored parent->child, traversed child->parent):
+        #     use as-is: R, t  (already maps child coords to parent coords)
+        R_combined = np.eye(3)
+        t_combined = np.zeros(3)
+        for key, forward in zip(path_keys, path_fwds):
+            parent, child = key.split('->', 1)
+            t, R = self.lookup_single_transform(parent, child, timestamp)
+            if t is None:
+                print(f"WARNING: lookup failed for {key} at t={timestamp}")
                 return np.array([0.0, 0.0, 0.0]), np.eye(3)
+            if forward:
+                # Traversing parent->child: invert to get child->parent point transform
+                R = R.T
+                t = -R @ t
+            R_combined = R @ R_combined
+            t_combined = R @ t_combined + t
 
-            # Chain transforms: sensor -> nose_tip -> base -> odom
-            R_combined = R3 @ R2 @ R1
-            t_combined = R3 @ R2 @ t1 + R3 @ t2 + t3
-
-            # Add world->odom if targeting world frame
-            if 'world' in to_frame:
-                t4, R4 = self.lookup_single_transform('mvp2_test_robot/world',
-                                                       'mvp2_test_robot/odom', timestamp)
-                if t4 is not None:
-                    R_combined = R4 @ R_combined
-                    t_combined = R4 @ t_combined + t4
-
-            return t_combined, R_combined
-
-        # Return identity transform if not found
-        print(f"WARNING: Could not find transform {from_frame} -> {to_frame}")
-
-        return np.array([0.0, 0.0, 0.0]), np.eye(3)
+        return t_combined, R_combined
 
     def extract_azimuth_from_transform(self, rotation_matrix):
         """
@@ -529,20 +577,66 @@ class FLSPointCloudReconstructor:
         else:
             raise ValueError(f"Unsupported encoding: {encoding}")
 
-        # Extract center column (or mean across columns) as 668 intensities
-        # The polar image has 668 range bins vertically
-        if width > 1:
-            # Take center column
-            center_col = width // 2
-            intensities = img[:, center_col]
+        if self.denoise:
+            img = denoise_sonar_image(img).astype(np.float32)
+
+        # One-time debug: print image shape and intensity stats
+        if not hasattr(self, '_img_debug_printed'):
+            self._img_debug_printed = True
+            print(f"[DEBUG] Image shape: {img.shape}, encoding: {encoding}, "
+                  f"min={img.min():.1f}, max={img.max():.1f}, mean={img.mean():.1f}, "
+                  f"nonzero={np.count_nonzero(img)}/{img.size}")
+
+        # Extract intensity profile(s) for inference.
+        # Three modes:
+        #   Column mode (default / --fls-col): img[:, col] — one range profile at fixed azimuth.
+        #     Use for downward/forward-looking FLS (sim). Returns tensor [1, num_bins].
+        #   Sidescan mode (--fls-col-min / --fls-col-max): img[:, col_min:col_max+1] — one range
+        #     profile per azimuth column. Returns tensor [num_cols, num_bins].
+        #   Row mode (--fls-row): img[row, :] — azimuth profile at fixed range (legacy/broken).
+        if self.fls_col_min is not None or self.fls_col_max is not None:
+            col_min = self.fls_col_min if self.fls_col_min is not None else 0
+            col_max = self.fls_col_max if self.fls_col_max is not None else width - 1
+            cols = img[:, col_min:col_max + 1]  # (height, num_cols)
+
+            # Pad or truncate rows to num_bins
+            if cols.shape[0] < self.num_bins:
+                cols = np.pad(cols, ((0, self.num_bins - cols.shape[0]), (0, 0)), mode='edge')
+            elif cols.shape[0] > self.num_bins:
+                cols = cols[:self.num_bins, :]
+
+            cols = np.clip(cols - self.intensity_offset, 0, None) * self.intensity_scale
+            # tensor: [num_cols, num_bins]
+            tensor = torch.from_numpy(cols.T.astype(np.float32))
+
+            if not hasattr(self, '_slice_debug_printed'):
+                self._slice_debug_printed = True
+                print(f"[DEBUG] sidescan cols {col_min}..{col_max} ({tensor.shape[0]} cols), "
+                      f"tensor shape={tensor.shape}")
+            return tensor
+
+        if self.fls_row is not None:
+            intensities = img[self.fls_row, :]
+            if not hasattr(self, '_slice_debug_printed'):
+                self._slice_debug_printed = True
+                print(f"[DEBUG] fls_row={self.fls_row} slice: min={intensities.min():.1f}, max={intensities.max():.1f}, "
+                      f"mean={intensities.mean():.1f}, nonzero={np.count_nonzero(intensities)}/{len(intensities)}")
+        elif width > 1:
+            col = self.fls_col if self.fls_col is not None else width // 2
+            intensities = img[:, col]
         else:
             intensities = img.flatten()
 
-        # Ensure we have exactly 668 values
-        if len(intensities) != self.num_bins:
-            raise ValueError(f"Expected {self.num_bins} range bins, got {len(intensities)}")
+        # Pad or truncate to match expected num_bins
+        if len(intensities) < self.num_bins:
+            intensities = np.pad(intensities, (0, self.num_bins - len(intensities)), mode='edge')
+        elif len(intensities) > self.num_bins:
+            intensities = intensities[:self.num_bins]
 
-        # Convert to torch tensor [1, 668]
+        # Subtract background offset then scale to match training data distribution
+        intensities = np.clip(intensities - self.intensity_offset, 0, None) * self.intensity_scale
+
+        # Convert to torch tensor [1, num_bins]
         tensor = torch.from_numpy(intensities).unsqueeze(0)
 
         return tensor
@@ -555,12 +649,15 @@ class FLSPointCloudReconstructor:
         with torch.no_grad():
             image_tensor = image_tensor.to(self.device)
 
-            # Model returns: final_predictions [B, 2672], neg20_logits, valid_vs_neg10_logits, angle_preds
+            # Model returns: final_predictions [B, num_bins*num_beams], neg20_logits, valid_vs_neg10_logits, angle_preds
             final_predictions, _, _, _ = self.model(image_tensor)
 
-            # final_predictions is [batch, 2672] where 2672 = 668 bins * 4 beams
+            # final_predictions is [batch, num_bins*num_beams]
             # Already contains phi angles (or -20.0, -10.0 for invalid)
-            phi_angles = final_predictions.cpu().numpy().reshape(self.num_bins, self.num_beams)
+            batch = final_predictions.shape[0]
+            phi_angles = final_predictions.cpu().numpy().reshape(batch, self.num_bins, self.num_beams)
+            if batch == 1:
+                phi_angles = phi_angles[0]  # [num_bins, num_beams] — single column / row mode
 
         return phi_angles
 
@@ -569,38 +666,61 @@ class FLSPointCloudReconstructor:
         Convert phi angles to 3D points using position and rotation from TF.
 
         Args:
-            phi_angles: [num_bins, num_beams] array of elevation angles
+            phi_angles: [num_bins, num_beams] for single-column mode, or
+                        [num_cols, num_bins, num_beams] for sidescan mode.
             position: [x, y, z] translation from sensor to world frame
             rotation: 3x3 rotation matrix from sensor to world frame
         """
-        for bin_idx in range(self.num_bins):
-            # Calculate range for this bin (reverse indexed)
-            reverse_idx = self.num_bins - 1 - bin_idx
-            range_val = self.min_range + (reverse_idx / self.num_bins) * (self.max_range - self.min_range)
+        # Sidescan mode: phi_angles is [num_cols, num_bins, num_beams] — vectorized.
+        if phi_angles.ndim == 3:
+            num_cols = phi_angles.shape[0]
+            col_min = self.fls_col_min if self.fls_col_min is not None else 0
+            col_max = self.fls_col_max if self.fls_col_max is not None else col_min + num_cols - 1
+            total_cols = col_max - col_min + 1
 
-            # Get phi angles for this bin (4 beams)
-            phi_beams = phi_angles[bin_idx]
+            # Azimuth angle per column [num_cols]
+            fov_rad = getattr(self, 'fls_hfov_rad', np.radians(130.0))
+            col_abs = np.arange(col_min, col_min + num_cols)
+            az_rad = ((col_abs - (col_min + col_max) / 2.0) / max(total_cols, 1)) * fov_rad  # [num_cols]
 
-            # Use all valid beams
-            for beam_idx in range(self.num_beams):
-                phi_rad = phi_beams[beam_idx]
+            # Range per bin [num_bins]
+            reverse_idx = np.arange(self.num_bins - 1, -1, -1)
+            ranges = self.min_range + (reverse_idx / self.num_bins) * (self.max_range - self.min_range)  # [num_bins]
 
-                # Filter out invalid predictions: -20.0 = no detection, -10.0 = uncertain
-                if np.isnan(phi_rad) or phi_rad <= -10.0:
-                    continue
+            # Valid mask: [num_cols, num_bins, num_beams]
+            valid = (~np.isnan(phi_angles)) & (phi_angles > -10.0)
 
-                # Point in sensor frame (based on R1: Z is forward/beam, Y is vertical)
-                # Phi is elevation angle from beam axis
-                x_local = 0.0  # No lateral spread
-                y_local = range_val * np.sin(phi_rad)  # Vertical in sensor frame
-                z_local = range_val * np.cos(phi_rad)  # Forward along beam axis
+            # Broadcast ranges and az_rad to full shape
+            ranges_3d = ranges[np.newaxis, :, np.newaxis]          # [1, num_bins, 1]
+            az_3d     = az_rad[:, np.newaxis, np.newaxis]           # [num_cols, 1, 1]
 
-                # Apply full TF transform (robot pose only)
-                point_local = np.array([x_local, y_local, z_local])
-                point_world = rotation @ point_local + position
+            x_all = ranges_3d * np.cos(phi_angles)                  # [num_cols, num_bins, num_beams]
+            y_all = ranges_3d * np.sin(phi_angles)
+            z_all = ranges_3d * np.sin(az_3d) * np.ones_like(phi_angles)
 
-                self.points.append(point_world)
-                self.intensities.append(1.0)
+            pts_local = np.stack([x_all[valid], y_all[valid], z_all[valid]], axis=1)  # [N, 3]
+            pts_world = (rotation @ pts_local.T).T + position                          # [N, 3]
+
+            self.points.extend(pts_world.tolist())
+            self.intensities.extend([1.0] * len(pts_world))
+            return
+
+        # Single-column / row mode: phi_angles is [num_bins, num_beams] — vectorized.
+        valid = (~np.isnan(phi_angles)) & (phi_angles > -10.0)  # [num_bins, num_beams]
+
+        reverse_idx = np.arange(self.num_bins - 1, -1, -1)
+        ranges = self.min_range + (reverse_idx / self.num_bins) * (self.max_range - self.min_range)
+        ranges_2d = ranges[:, np.newaxis]  # [num_bins, 1]
+
+        x_all = ranges_2d * np.cos(phi_angles)   # [num_bins, num_beams]
+        y_all = ranges_2d * np.sin(phi_angles)
+        z_all = np.zeros_like(phi_angles)
+
+        pts_local = np.stack([x_all[valid], y_all[valid], z_all[valid]], axis=1)  # [N, 3]
+        pts_world = (rotation @ pts_local.T).T + position                          # [N, 3]
+
+        self.points.extend(pts_world.tolist())
+        self.intensities.extend([1.0] * len(pts_world))
 
     def process_laserscan(self, msg, position, rotation):
         """
@@ -629,7 +749,8 @@ class FLSPointCloudReconstructor:
 
     def process_bag(self, bag_path, fls_topic, mbes_topic, use_tf,
                     sonar_frame, mbes_frame, world_frame,
-                    use_gt_odom=False, gt_odom_topic=None, est_odom_topic=None):
+                    use_gt_odom=False, gt_odom_topic=None, est_odom_topic=None,
+                    urdf_path=None, tf_prefix=''):
         """
         Process ROS 2 bag file (MCAP format) and extract FLS and MBES point clouds.
 
@@ -680,6 +801,9 @@ class FLSPointCloudReconstructor:
         else:
             print("WARNING: No TF messages found! Will use identity transforms for static frames.")
 
+        if urdf_path:
+            inject_urdf_static_tfs(self.tf_tree, urdf_path, tf_prefix=tf_prefix)
+
         if gt_odom_topic:
             print(f"Collected {len(gt_odom_messages)} ground truth odometry messages")
             if len(gt_odom_messages) > 0:
@@ -721,9 +845,14 @@ class FLSPointCloudReconstructor:
                     # Run inference to get phi angles
                     phi_angles = self.run_inference(image_tensor)
 
-                    # Get timestamp from message header
+                    # Get timestamp — prefer header stamp, fall back to bag log_time_ns
                     header_stamp = mcap_msg.ros_msg.header.stamp
                     timestamp_ns = int(header_stamp.sec * 1e9 + header_stamp.nanosec)
+                    if timestamp_ns == 0:
+                        timestamp_ns = mcap_msg.log_time_ns
+
+                    if fls_count == 0:
+                        print(f"First FLS timestamp_ns: {timestamp_ns}")
 
                     if use_gt_odom:
                         # Use ground truth odometry for base_link pose + TF for static sensor transforms
@@ -742,6 +871,10 @@ class FLSPointCloudReconstructor:
                         # Compare with TF path (even if using GT odom)
                         tf_pos, tf_rot = self.get_transform_at_time(sonar_frame, world_frame, timestamp_ns)
                         print(f"TF path pose: t={tf_pos}, R=\n{tf_rot}")
+                        valid_phis = phi_angles[phi_angles > -10.0]
+                        print(f"Phi angles — valid: {len(valid_phis)}/{phi_angles.size}, "
+                              f"min={valid_phis.min():.3f}, max={valid_phis.max():.3f}, "
+                              f"mean={valid_phis.mean():.3f} rad") if len(valid_phis) > 0 else print("Phi angles — NO valid predictions")
 
                     # Collect poses for odometry evaluation (GT vs Estimated odom)
                     # Only collect if we have estimated odom topic
@@ -805,6 +938,12 @@ class FLSPointCloudReconstructor:
                             self.odom_eval_est_positions.append(est_pos.copy())
                             self.odom_eval_est_orientations.append(est_quat.copy())
 
+                    # Record positions for trajectory plot
+                    self.reconstruction_positions.append(position.copy())
+                    bl_frame = sonar_frame.rsplit('/', 1)[0] + '/base_link' if '/' in sonar_frame else 'base_link'
+                    bl_pos, _ = self.get_transform_at_time(bl_frame, world_frame, timestamp_ns)
+                    self.reconstruction_bl_positions.append(bl_pos.copy() if bl_pos is not None else position.copy())
+
                     # Reconstruct 3D points
                     self.reconstruct_points(phi_angles, position, rotation)
                     fls_count += 1
@@ -814,9 +953,11 @@ class FLSPointCloudReconstructor:
 
                 # Process MBES messages
                 elif mcap_msg.channel.topic == mbes_topic:
-                    # Get timestamp from message header
+                    # Get timestamp — prefer header stamp, fall back to bag log_time_ns
                     header_stamp = mcap_msg.ros_msg.header.stamp
                     timestamp_ns = int(header_stamp.sec * 1e9 + header_stamp.nanosec)
+                    if timestamp_ns == 0:
+                        timestamp_ns = mcap_msg.log_time_ns
 
                     if use_gt_odom:
                         # Use ground truth odometry for base_link pose + TF for static sensor transforms
@@ -870,8 +1011,30 @@ class FLSPointCloudReconstructor:
             dict with evaluation results, or None if insufficient data
         """
         if len(self.odom_eval_timestamps) < 2:
-            print("WARNING: Insufficient odometry data for evaluation.")
-            print("  Make sure to provide both --gt-odom-topic and --est-odom-topic.")
+            if plot and len(self.reconstruction_positions) >= 2:
+                # No GT available — plot both fls_link and base_link trajectories for comparison
+                pts_sensor = np.array(self.reconstruction_positions)
+                _, ax = plt.subplots(figsize=(8, 8))
+                ax.plot(pts_sensor[:, 0], pts_sensor[:, 1], linewidth=1.5, label='fls_link (sensor)')
+                ax.scatter(pts_sensor[0, 0], pts_sensor[0, 1], c='green', s=60, zorder=5, label='Start')
+                ax.scatter(pts_sensor[-1, 0], pts_sensor[-1, 1], c='red', s=60, zorder=5, label='End')
+                if len(self.reconstruction_bl_positions) >= 2:
+                    pts_bl = np.array(self.reconstruction_bl_positions)
+                    ax.plot(pts_bl[:, 0], pts_bl[:, 1], linewidth=1.5, linestyle='--', label='base_link')
+                ax.set_xlabel('X (m)')
+                ax.set_ylabel('Y (m)')
+                ax.set_title('Trajectory comparison: fls_link vs base_link (world frame)')
+                ax.legend()
+                ax.set_aspect('equal')
+                ax.grid(True)
+                plt.tight_layout()
+                if save_plot_path:
+                    plt.savefig(save_plot_path, dpi=150)
+                    print(f"Saved trajectory plot to {save_plot_path}")
+                plt.show()
+            else:
+                print("WARNING: Insufficient odometry data for evaluation.")
+                print("  Make sure to provide both --gt-odom-topic and --est-odom-topic.")
             return None
 
         print(f"\n{'='*70}")
@@ -1743,7 +1906,7 @@ def main():
     parser.add_argument('bag_path', type=str, help='Path to ROS 2 .mcap bag file')
     parser.add_argument('--model', type=str, required=True,
                        help='Path to trained model checkpoint')
-    parser.add_argument('--topic', type=str, default='/mvp2_test_robot/fls/data/image',
+    parser.add_argument('--topic', type=str, default='/mvp2_test_robot/fls/data/denoised_image',
                        help='FLS image topic name')
     parser.add_argument('--mbes-topic', type=str, default='/mvp2_test_robot/mbes/data',
                        help='MBES LaserScan topic name')
@@ -1797,13 +1960,49 @@ def main():
                        help='Plot GT vs TF trajectory comparison')
     parser.add_argument('--save-odom-plot', type=str, default=None,
                        help='Save trajectory comparison plot to PNG file (e.g., trajectory.png)')
+    parser.add_argument('--urdf', type=str, default=None,
+                       help='Path to URDF file to inject missing static TF transforms')
+    parser.add_argument('--tf-prefix', type=str, default='',
+                       help='TF namespace prefix used in the bag (e.g. alpha_rise)')
+    parser.add_argument('--fls-col', type=int, default=None,
+                       help='Column index to extract from FLS image (default: center column)')
+    parser.add_argument('--fls-row', type=int, default=None,
+                       help='Row index to extract azimuth profile instead of range column. '
+                            'Use for side-looking FLS to virtually rotate sensor 90° to match sim geometry.')
+    parser.add_argument('--fls-col-min', type=int, default=None,
+                       help='Sidescan mode: first column (azimuth) to process. '
+                            'Use with --fls-col-max to skip water-surface lobe on left side of image.')
+    parser.add_argument('--fls-col-max', type=int, default=None,
+                       help='Sidescan mode: last column (azimuth) to process (inclusive).')
+    parser.add_argument('--intensity-scale', type=float, default=1.0,
+                       help='Multiplicative scale applied to raw intensity values before inference. '
+                            'Training data (sim) spans ~0-122; field Oculus mono8 spans 0-255. '
+                            'Use 122/255 ≈ 0.478 for field Oculus bags. Default 1.0 (no scaling, correct for sim).')
+    parser.add_argument('--intensity-offset', type=float, default=0.0,
+                       help='Subtract this value from intensities before scaling (clipped to 0). '
+                            'Use to remove DC noise floor from field data, e.g. 7.0 for Oculus bags.')
+    parser.add_argument('--denoise', action='store_true',
+                       help='Apply bilateral filter denoising to each sonar image before inference.')
 
     args = parser.parse_args()
+
+    sidescan = args.fls_col_min is not None or args.fls_col_max is not None
+    if sidescan and (args.fls_col is not None or args.fls_row is not None):
+        parser.error("--fls-col-min/--fls-col-max are mutually exclusive with --fls-col and --fls-row")
+    if args.fls_row is not None and args.fls_col is not None:
+        parser.error("--fls-row and --fls-col are mutually exclusive")
 
     # Create reconstructor
     reconstructor = FLSPointCloudReconstructor(
         model_path=args.model,
-        device=args.device
+        device=args.device,
+        fls_col=args.fls_col,
+        fls_row=args.fls_row,
+        fls_col_min=args.fls_col_min,
+        fls_col_max=args.fls_col_max,
+        intensity_scale=args.intensity_scale,
+        intensity_offset=args.intensity_offset,
+        denoise=args.denoise
     )
 
     # Process bag (this will detect sensor mount pitch on first message)
@@ -1817,7 +2016,9 @@ def main():
         world_frame=args.world_frame,
         use_gt_odom=args.use_gt_odom,
         gt_odom_topic=args.gt_odom_topic,
-        est_odom_topic=args.est_odom_topic
+        est_odom_topic=args.est_odom_topic,
+        urdf_path=args.urdf,
+        tf_prefix=args.tf_prefix
     )
 
     # Save FLS to PLY if requested

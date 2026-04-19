@@ -23,6 +23,7 @@ Thumbs.db
 *.pyc
 *.pyo
 *.ply
+*.pcd
 *.pyd
 *.mcap
 __pycache__/
@@ -42,6 +43,7 @@ log/
 test_indices_vs_original/
 train_indices_vs_original/
 data_splits/
+plot/
 test_*
 class_pred*
 saved/

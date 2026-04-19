@@ -2,8 +2,8 @@ Return Classification Performance (Combined: Train+Val+Test)
 ================================================================================
 Class                      Recall    Precision     F1-Score
 --------------------------------------------------------------------------------
-Valid                       82.0%        60.5%        69.7%
-Partial Return              97.8%        47.7%        64.1%
-No-return                   90.9%        99.7%        95.1%
+Valid                       51.3%        74.8%        60.9%
+Partial Return              50.9%        60.9%        55.4%
+No-return                   96.8%        93.5%        95.1%
 --------------------------------------------------------------------------------
-Overall Accuracy            91.0%
+Overall Accuracy            90.6%

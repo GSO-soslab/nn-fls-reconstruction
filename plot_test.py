@@ -5,6 +5,20 @@ import numpy as np
 from scipy.spatial.distance import cdist
 from tqdm import tqdm
 
+# ── CSV layout constants ──────────────────────────────────────────────────────
+N_BINS      = 468  # number of range bins
+N_BEAMS     = 4    # reflections (tangents/phis) per bin
+# Col 0                              : timestamp       (original CSV)
+# Col 0 = row_index, Col 1           : timestamp       (test CSV with indices)
+# Cols 1           .. N_BINS         : intensities     (N_BINS values)
+# Cols N_BINS+1    .. (1+N_BEAMS)*N_BINS   : tangents (N_BEAMS per bin)
+# Cols (1+N_BEAMS)*N_BINS+1 .. (1+2*N_BEAMS)*N_BINS   : phis (N_BEAMS per bin)
+_INT_START  = 1
+_INT_END    = 1 + N_BINS                           # 469
+_PHI_START  = 1 + (1 + N_BEAMS) * N_BINS          # 2341
+_PHI_END    = 1 + (1 + 2 * N_BEAMS) * N_BINS      # 4213
+# ─────────────────────────────────────────────────────────────────────────────
+
 # Set global font sizes for all plots
 plt.rcParams.update({
     'font.size': 25,           # Base font size
@@ -131,39 +145,23 @@ def extract_pcl_points_from_row(row_data, range_resolution, intensity_threshold,
             return float('nan')
 
     numeric_values = [safe_float(v) for v in values]
-    # print(len(numeric_values))
-    # print("First 10 cols:", numeric_values[:10])
-    # print("Around 3335–3345:", numeric_values[3335:3345])
-    # print("Around 6005–6015:", numeric_values[6005:6015])
 
     # Extract intensities and phis based on column positions
-    if has_indices:
-        # Skip first column (index) in test data
-        intensities = numeric_values[2:670]  # columns 2-669
-        # print(intensities[:5])
-        phis = numeric_values[3341:6014]     # columns 3342-6013\
-        # phis = numeric_values[3342:6014].reshape(668, 4)
-        # print(phis[150:200])
-        # print("Has Indices")
-    else:
-        intensities = numeric_values[1:669]  # columns 1-668
-        # print(intensities[:5])
-        phis = numeric_values[3341:6014]     # columns 3341-6012
-        # phis = numeric_values[3341:6013].reshape(668, 4)
-        # print(phis[150:400])
-        # print("No Indices")
+    # test CSV has an extra row_index prepended, so shift by 1
+    offset = 1 if has_indices else 0
+    intensities = numeric_values[offset + _INT_START : offset + _INT_END]
+    phis        = numeric_values[offset + _PHI_START : offset + _PHI_END]
 
     x_points = []
     z_points = []
 
-    for point_idx in range(1,668):
-        reverse_idx = 669 - point_idx
+    for point_idx in range(1, N_BINS):
+        reverse_idx = N_BINS - point_idx
 
         # Range calculation using the full range span
         max_range = 40.0
         min_range = 0.0
-        # range_val = min_range + (reverse_idx / 668) * (max_range - min_range)
-        range_val = ((max_range *(reverse_idx))/ 668)
+        range_val = (max_range * reverse_idx) / N_BINS
         # # Take only the FIRST valid phi from the 4 beams
         # phi_start_idx = point_idx * 4
         # phi_rad = -20.0
@@ -195,9 +193,9 @@ def extract_pcl_points_from_row(row_data, range_resolution, intensity_threshold,
             # z= phi_rad
 
         # # Take ALL the valid phis from the 4 beams
-        phi_start_idx = point_idx * 4
+        phi_start_idx = point_idx * N_BEAMS
 
-        for beam_idx in range(4):
+        for beam_idx in range(N_BEAMS):
             phi_idx = phi_start_idx + beam_idx
 
             if phi_idx < len(phis):

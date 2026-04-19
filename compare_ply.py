@@ -17,7 +17,7 @@ def load_ply(path):
     return np.asarray(pcd.points)
 
 
-def compute_chamfer(fls_pts, mbes_pts, f_thresholds=(0.3, 0.3, 0.3)):
+def compute_chamfer(fls_pts, mbes_pts, f_thresholds=(0.1, 0.1, 0.1)):
     """Chamfer Distance, Hausdorff, and F-Score (full 3D, point-to-point)."""
     fls_pcd = o3d.geometry.PointCloud()
     fls_pcd.points = o3d.utility.Vector3dVector(fls_pts)
@@ -122,52 +122,66 @@ def compute_error(fls_pts, mbes_pts, bin_size=0.5):
     }
 
 
-def plot_pair(fls_pts, mbes_pts, name, chamfer, subsample=1):
+def plot_pair(fls_pts, mbes_pts, name, chamfer, subsample=1, tau=None):
     """Plot FLS, MBES, FLS coloured by error, and correspondence lines."""
-    fig = plt.figure(figsize=(28, 6))
+    from matplotlib.gridspec import GridSpec
+    fig = plt.figure(figsize=(21, 6))
+    # 3 plots + colorbar column (coverage plot temporarily disabled)
+    gs = GridSpec(1, 4, figure=fig, width_ratios=[1, 1, 1, 0.06], wspace=0.25)
 
     fls_sub = fls_pts[::subsample]
     mbes_sub = mbes_pts[::subsample]
     d_fls_sub = chamfer['d_fls'][::subsample]
 
+    def style_ax(ax, title):
+        ax.set_title(title, fontsize=20)
+        ax.set_xlabel('X(m)', fontsize=14, labelpad=15)
+        ax.set_ylabel('Y(m)', fontsize=14, labelpad=15)
+        ax.set_zlabel('Z(m)', fontsize=14, labelpad=15)
+        ax.tick_params(axis='both', labelsize=16)
+
     # FLS
-    ax1 = fig.add_subplot(1, 4, 1, projection='3d')
+    ax1 = fig.add_subplot(gs[0, 0], projection='3d')
     ax1.scatter(fls_sub[:, 0], fls_sub[:, 1], fls_sub[:, 2], s=0.3, c=fls_sub[:, 2], cmap='viridis')
-    ax1.set_title(f'FLS — {name}')
-    ax1.set_xlabel('X'); ax1.set_ylabel('Y'); ax1.set_zlabel('Z')
+    style_ax(ax1, f'FLS — {name}')
 
     # MBES
-    ax2 = fig.add_subplot(1, 4, 2, projection='3d')
+    ax2 = fig.add_subplot(gs[0, 1], projection='3d')
     ax2.scatter(mbes_sub[:, 0], mbes_sub[:, 1], mbes_sub[:, 2], s=0.3, c=mbes_sub[:, 2], cmap='viridis')
-    ax2.set_title(f'MBES — {name}')
-    ax2.set_xlabel('X'); ax2.set_ylabel('Y'); ax2.set_zlabel('Z')
+    style_ax(ax2, f'MBES — {name}')
 
     # FLS coloured by per-point distance to nearest MBES point
-    ax3 = fig.add_subplot(1, 4, 3, projection='3d')
-    sc = ax3.scatter(fls_sub[:, 0], fls_sub[:, 1], fls_sub[:, 2], s=0.3, c=d_fls_sub, cmap='hot_r')
-    ax3.set_title(f'FLS Error (dist→MBES) — {name}')
-    ax3.set_xlabel('X'); ax3.set_ylabel('Y'); ax3.set_zlabel('Z')
-    plt.colorbar(sc, ax=ax3, label='Distance (m)', shrink=0.5, pad=0.1)
+    ax3 = fig.add_subplot(gs[0, 2], projection='3d')
+    vmax = tau if tau is not None else d_fls_sub.max()
+    sc = ax3.scatter(fls_sub[:, 0], fls_sub[:, 1], fls_sub[:, 2], s=0.3, c=d_fls_sub, cmap='hot_r', vmin=0, vmax=vmax)
+    style_ax(ax3, f'FLS Error (dist→MBES, τ={tau:.2f}m) — {name}' if tau is not None else f'FLS Error (dist→MBES) — {name}')
+    cax = fig.add_subplot(gs[0, 3])
 
-    # Correspondences: lines from each MBES point to its nearest FLS neighbour
-    ax4 = fig.add_subplot(1, 4, 4, projection='3d')
-    nn_idx = chamfer['nn_idx']
-    d_mbes_full = chamfer['d_mbes_nn']
-    vmax = np.percentile(d_mbes_full, 95)
-    cmap = plt.get_cmap('hot_r')
-    segments = np.stack([mbes_pts, fls_pts[nn_idx]], axis=1)  # (N, 2, 3)
-    colors = cmap(np.clip(d_mbes_full / vmax, 0.0, 1.0))
-    lc = Line3DCollection(segments, colors=colors, linewidths=0.4, alpha=0.6)
-    ax4.add_collection(lc)
-    ax4.scatter(mbes_pts[:, 0], mbes_pts[:, 1], mbes_pts[:, 2], s=0.5, c='blue', label='MBES')
-    ax4.scatter(fls_pts[nn_idx, 0], fls_pts[nn_idx, 1], fls_pts[nn_idx, 2],
-                s=0.5, c='red', label='FLS')
-    ax4.set_title(f'Correspondences MBES→FLS — {name}')
-    ax4.set_xlabel('X'); ax4.set_ylabel('Y'); ax4.set_zlabel('Z')
+    for i, ax in enumerate([ax1, ax2, ax3]):
+        label = f'({chr(ord("a") + i)})'
+        ax.text2D(0.5, -0.08, label, transform=ax.transAxes, ha='center', fontsize=18, fontweight='bold')
+    cb = fig.colorbar(sc, cax=cax, label='Distance (m)')
+    cb.ax.tick_params(labelsize=16)
+    cb.set_label('Distance (m)', fontsize=16)
+
+    # # Correspondences: MBES points coloured by whether they found a FLS match within tau
+    # ax4 = fig.add_subplot(gs[0, 4], projection='3d')
+    # d_mbes_full = chamfer['d_mbes_nn']
+    # tau = sorted(chamfer['inliers'].keys())[0]  # use smallest threshold
+    # matched = d_mbes_full < tau
+    # n_matched = int(np.sum(matched))
+    # n_unmatched = int(np.sum(~matched))
+    # ax4.scatter(mbes_pts[matched, 0], mbes_pts[matched, 1], mbes_pts[matched, 2],
+    #             s=0.5, c='blue', label=f'Matched in FLS ({n_matched})', alpha=0.7)
+    # ax4.scatter(mbes_pts[~matched, 0], mbes_pts[~matched, 1], mbes_pts[~matched, 2],
+    #             s=0.5, c='red', label=f'No correspondence ({n_unmatched})', alpha=0.7)
+    # ax4.legend(markerscale=4, loc='lower left', fontsize=6, handlelength=1, handletextpad=0.5)
+    # ax4.set_title(f'MBES Correspondences in FLS — {name}')
+    # ax4.set_xlabel('X'); ax4.set_ylabel('Y'); ax4.set_zlabel('Z')
 
     # Match axes limits
     all_pts = np.vstack([fls_pts, mbes_pts])
-    for ax in [ax1, ax2, ax3, ax4]:
+    for ax in [ax1, ax2, ax3]:
         ax.set_xlim(all_pts[:, 0].min(), all_pts[:, 0].max())
         ax.set_ylim(all_pts[:, 1].min(), all_pts[:, 1].max())
         ax.set_zlim(all_pts[:, 2].min(), all_pts[:, 2].max())
@@ -193,35 +207,28 @@ def plot_pair(fls_pts, mbes_pts, name, chamfer, subsample=1):
     #     for tau, iv in sorted(chamfer['inliers'].items())
     # )
 
-    inlier_lines = ''.join(
-    f"  τ={tau:.2f}m — MBES→FLS (coverage): {iv['mbes_inliers']}/{iv['mbes_total']} ({iv['mbes_pct']:.1f}%)\n"
-    for tau, iv in sorted(chamfer['inliers'].items())
-    )
-    # guide = ("── Interpretation Guide ──\n"
-    #          "High FLS→MBES % → many FLS points are noise / ghosts\n"
-    #          "Low  FLS→MBES % → FLS reconstruction is clean\n"
-    #          "High MBES→FLS % → FLS covered the real surface well  ✓\n"
-    #          "Low  MBES→FLS % → FLS missed parts of the real surface ✗")
+    # inlier_lines = ''.join(
+    #     f"  τ={tau:.2f}m — MBES→FLS (coverage): {iv['mbes_inliers']}/{iv['mbes_total']} ({iv['mbes_pct']:.1f}%)\n"
+    #     for tau, iv in sorted(chamfer['inliers'].items())
+    # )
+    # chamfer_text = (f"── 3D Metrics ──\n"
+    #                 f"Mean FLS→MBES (precision/noise): {chamfer['mean_fls2mbes']:.4f} m\n"
+    #                 f"Mean MBES→FLS (recall/coverage): {chamfer['mean_mbes2fls']:.4f} m\n"
+    #                 f"{inlier_lines}")
 
-    chamfer_text = (f"── 3D Metrics ──\n"
-                    f"Mean FLS→MBES (precision/noise): {chamfer['mean_fls2mbes']:.4f} m\n"
-                    f"Mean MBES→FLS (recall/coverage): {chamfer['mean_mbes2fls']:.4f} m\n"
-                    f"\n── Inliers within threshold ──\n"
-                    f"{inlier_lines}")
-                    # f"\n{guide}")
+    # fig.text(0.5, 0.02, chamfer_text, ha='center', va='bottom', fontsize=9, family='monospace',
+    #          bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.8))
 
-    fig.text(0.5, 0.02, chamfer_text, ha='center', va='bottom', fontsize=9, family='monospace',
-             bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.8))
-
-    fig.suptitle(f'{name}  —  FLS vs MBES Error', fontsize=14, fontweight='bold')
-    plt.tight_layout(rect=[0, 0.28, 1, 0.95])
+    fig.suptitle(f'{name}  —  FLS vs MBES Error', fontsize=20, fontweight='bold')
+    # plt.tight_layout(rect=[0, 0.28, 1, 0.95])
+    plt.tight_layout()
     return fig
 
 
 def main():
     parser = argparse.ArgumentParser(description='Compare FLS vs MBES PLY files with visualization')
     parser.add_argument('--dir', type=str,
-                        default=os.path.expanduser('~/Documents/CloudCompare'),
+                        default=os.path.expanduser('~/Documents/CloudCompare/bilateral_denoised'),
                         help='Directory containing PLY files')
     parser.add_argument('--bin-size', type=float, default=0.5)
     parser.add_argument('--subsample', type=int, default=1,
@@ -230,6 +237,8 @@ def main():
                         help='Save directory for figures (default: show interactively)')
     parser.add_argument('--fls', type=str, help='Single FLS PLY file')
     parser.add_argument('--mbes', type=str, help='Single MBES PLY file')
+    parser.add_argument('--thresholds', type=float, nargs='+', default=[0.1, 0.1, 0.1],
+                        help='F-score thresholds in metres (e.g. --thresholds 0.1 0.2)')
     args = parser.parse_args()
 
     # Build pairs
@@ -251,6 +260,7 @@ def main():
     if args.save:
         os.makedirs(args.save, exist_ok=True)
 
+    table_rows = []
     for fls_path, mbes_path, name in pairs:
         print(f"Processing {name}...")
         fls_pts = load_ply(fls_path)
@@ -261,7 +271,7 @@ def main():
             continue
 
         # metrics = compute_error(fls_pts, mbes_pts, args.bin_size)
-        chamfer = compute_chamfer(fls_pts, mbes_pts)
+        chamfer = compute_chamfer(fls_pts, mbes_pts, f_thresholds=args.thresholds)
         print(f"  Chamfer:   {chamfer['chamfer']:.6f} m²  |  Hausdorff: {chamfer['hausdorff']:.4f} m")
         print(f"  Mean FLS→MBES: {chamfer['mean_fls2mbes']:.4f} m  |  Mean MBES→FLS: {chamfer['mean_mbes2fls']:.4f} m")
         for tau, v in sorted(chamfer['f_scores'].items()):
@@ -270,16 +280,42 @@ def main():
         for tau, iv in sorted(chamfer['inliers'].items()):
             print(f"    τ={tau:.2f}m — FLS: {iv['fls_inliers']}/{iv['fls_total']} ({iv['fls_pct']:.1f}%)  "
                   f"MBES: {iv['mbes_inliers']}/{iv['mbes_total']} ({iv['mbes_pct']:.1f}%)")
-        fig = plot_pair(fls_pts, mbes_pts, name, chamfer, args.subsample)
+        table_rows.append((name, chamfer))
 
-        if args.save:
-            out_path = os.path.join(args.save, f'{name}_comparison.png')
-            fig.savefig(out_path, dpi=150, bbox_inches='tight')
-            print(f"  Saved: {out_path}")
-            plt.close(fig)
+        for tau in sorted(set(args.thresholds)):
+            fig = plot_pair(fls_pts, mbes_pts, name, chamfer, args.subsample, tau=tau)
+            if args.save:
+                tau_str = f'tau{tau:.2f}'.replace('.', 'p')
+                out_path = os.path.join(args.save, f'{name}_comparison_{tau_str}.png')
+                fig.savefig(out_path, dpi=150, bbox_inches='tight')
+                print(f"  Saved: {out_path}")
+                plt.close(fig)
 
     if not args.save:
         plt.show()
+
+    # Print LaTeX table
+    if table_rows:
+        taus = sorted(set(args.thresholds))
+        n_taus = len(taus)
+        tau_headers = ' & '.join(f'$\\tau$={t:.2f}m' for t in taus)
+        print("\n% ── LaTeX Table ──")
+        print(r"\begin{table}[h]")
+        print(r"  \centering")
+        print(r"  \caption{FLS vs.\ MBES reconstruction metrics across object geometries.}")
+        print(r"  \label{tab:results}")
+        print(r"  \begin{tabular}{l" + "c" * n_taus + "}")
+        print(r"    \hline")
+        print(f"     & \\multicolumn{{{n_taus}}}{{c}}{{Coverage (\\%)}} \\\\")
+        print(r"    \hline")
+        print(f"    Object & {tau_headers} \\\\")
+        print(r"    \hline")
+        for name, chamfer in table_rows:
+            cov_vals = ' & '.join(f"{chamfer['inliers'][t]['mbes_pct']:.1f}" for t in taus)
+            print(f"    {name.capitalize()} & {cov_vals} \\\\")
+        print(r"    \hline")
+        print(r"  \end{tabular}")
+        print(r"\end{table}")
 
 
 if __name__ == '__main__':
